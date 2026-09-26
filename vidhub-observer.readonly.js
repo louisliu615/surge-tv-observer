@@ -6,7 +6,7 @@
   try {
     if (typeof $argument !== 'string' || $argument.length > 4096) throw new Error();
     const input = JSON.parse(decodeURIComponent($argument));
-    const allowed = ['enabled','bindingVerified','host','port','deviceName','scope','expectedBuild'];
+    const allowed = ['enabled','bindingVerified','host','port','deviceName','scope','expectedBuild','trialId','latestStartMs','hardStopMs'];
     if (!input || Array.isArray(input) || typeof input !== 'object' ||
         Object.keys(input).sort().join() !== allowed.sort().join() ||
         input.enabled !== true || input.bindingVerified !== true || input.port !== 443 ||
@@ -20,6 +20,10 @@
         typeof input.expectedBuild !== 'string' || !/^[0-9]{1,10}$/.test(input.expectedBuild) ||
         typeof $environment !== 'object' || $environment.system !== 'tvOS' ||
         String($environment['surge-build']) !== input.expectedBuild) throw new Error();
+    if (typeof input.trialId !== 'string' || !/^[a-z0-9-]{16,64}$/.test(input.trialId) ||
+        !Number.isSafeInteger(input.latestStartMs) || !Number.isSafeInteger(input.hardStopMs) ||
+        input.hardStopMs - input.latestStartMs !== 300000 ||
+        Date.now() < input.latestStartMs - 1800000) throw new Error();
     __binding = Object.freeze(input);
   } catch (_) { $done({}); return; }
 
@@ -464,54 +468,136 @@
   return {create, endpoint};
 }));
 
-/* Local draft entry. Building it does not register, execute, or deploy it. */
+/* Five-minute read-only scheduler validation. No connection-control API. */
 (function () {
   'use strict';
-  // Internal schema/platform verified by one-shot TV probes on 2026-09-26.
-  // The dedicated deployment binding is still unapproved; keep both gates closed.
-  // DEPLOYMENT_CONFIG_BEGIN
-  const deployment = Object.freeze({
-    enabled: __binding.enabled, mode: 'observe', bindingVerified: __binding.bindingVerified,
-    expectedSystemValue: 'tvOS', schema: {
-      verified: true, rowsPath: ['requests'], fields: {
-        id: ['id'], url: ['URL'], inBytes: ['inBytes'], local: ['local'],
-        deviceName: ['deviceName'], completed: ['completed'], failed: ['failed']
-      }
-    },
-    scope: __binding.scope
-  });
-  // DEPLOYMENT_CONFIG_END
+  const started = Date.now();
+  const b = __binding, key = 'vidhub-trial-' + b.trialId;
   let finished = false;
-  function done() { if (!finished) { finished = true; $done(); } }
-  if (!deployment.enabled || deployment.mode !== 'observe' || !deployment.bindingVerified ||
-      !deployment.expectedSystemValue || typeof $environment !== 'object' ||
-      $environment.system !== deployment.expectedSystemValue) { done(); return; }
-  let adapt;
-  try { adapt = VidHubAdapter.create(deployment.schema); }
-  catch (_) { done(); return; }
-  const key = 'vidhub-readonly-tv-v1';
-  let saved = null;
-  try { saved = $persistentStore.read(key); } catch (_) { /* cold protected baseline */ }
+  function done(reason) {
+    if (finished) return;
+    finished = true;
+    if (reason) console.log(JSON.stringify({trial: true, reason}));
+    $done();
+  }
+  function readState() {
+    const raw = $persistentStore.read(key);
+    if (raw === null) return null;
+    if (typeof raw !== 'string' || VidHubRunner.byteLength(raw) > 65536) throw new Error();
+    return JSON.parse(raw);
+  }
+  function writeState(value) {
+    const raw = JSON.stringify(value);
+    return VidHubRunner.byteLength(raw) <= 65536 &&
+      $persistentStore.write(raw, key) === true && $persistentStore.read(key) === raw;
+  }
+  const session = typeof $script === 'object' && $script.sessionID;
+  if (typeof session !== 'string' || session.length < 1 || session.length > 80 ||
+      !Number.isSafeInteger(started) || started >= b.hardStopMs) { done('trial_expired_or_missing_session'); return; }
+  let state;
+  try {
+    state = readState();
+    if (state === null) {
+      if (started > b.latestStartMs) { done('trial_start_window_closed'); return; }
+      state = {version: 1, trialId: b.trialId, scope: b.scope, startMs: started,
+        endMs: Math.min(started + 300000, b.hardStopMs), runs: 0, lastEndMs: started,
+        leaseUntilMs: 0, owner: null, halted: false, checkpoint: null, reports: []};
+    }
+    const fields = ['version','trialId','scope','startMs','endMs','runs','lastEndMs',
+      'leaseUntilMs','owner','halted','checkpoint','reports'];
+    if (!state || Object.keys(state).sort().join() !== fields.sort().join() ||
+        state.version !== 1 || state.trialId !== b.trialId || state.scope !== b.scope ||
+        !Number.isSafeInteger(state.startMs) || !Number.isSafeInteger(state.endMs) ||
+        state.endMs !== Math.min(state.startMs + 300000, b.hardStopMs) ||
+        !Number.isSafeInteger(state.lastEndMs) || !Number.isSafeInteger(state.leaseUntilMs) ||
+        !Number.isInteger(state.runs) || state.runs < 0 || state.runs > 10 ||
+        typeof state.halted !== 'boolean' || !Array.isArray(state.reports) || state.reports.length > 10 ||
+        (state.owner !== null && typeof state.owner !== 'string') ||
+        (state.checkpoint !== null && typeof state.checkpoint !== 'string')) throw new Error();
+    if (state.halted || state.runs >= 10 || started >= state.endMs) { done('trial_complete'); return; }
+    if (started < state.lastEndMs || started < state.startMs) { done('trial_clock_backwards'); return; }
+    if (state.owner !== null) {
+      // This is an observational guard, not an atomic cross-process lock.
+      // A crashed/unfinished batch ends this trial; it is never silently taken over.
+      done(started < state.leaseUntilMs ? 'trial_overlap_guard' : 'trial_unfinished_batch'); return;
+    }
+    state.runs++;
+    state.owner = session;
+    state.leaseUntilMs = started + 30000;
+    if (!writeState(state)) { done('trial_storage_unavailable'); return; }
+  } catch (_) { done('trial_invalid_storage'); return; }
+  const duration = Math.min(29700, state.endMs - started);
+  if (duration < 100) { done('trial_complete'); return; }
+  const schema = {verified: true, rowsPath: ['requests'], fields: {
+    id: ['id'], url: ['URL'], inBytes: ['inBytes'], local: ['local'],
+    deviceName: ['deviceName'], completed: ['completed'], failed: ['failed']
+  }};
+  const adapt = VidHubAdapter.create(schema);
+  const latencies = [], intervals = [], states = {};
+  let firstMidpoint = null, lastMidpoint = null, growth = 0, previousTotal = null;
+  let savedCheckpoint = null;
+  try {
+    if (state.checkpoint) previousTotal = JSON.parse(JSON.parse(state.checkpoint).core).state.total;
+  } catch (_) { previousTotal = null; }
+  const previousReport = state.reports[state.reports.length - 1];
+  function percentile(values, p) {
+    if (!values.length) return null;
+    const sorted = values.slice().sort((a,c) => a-c);
+    return sorted[Math.round((sorted.length - 1) * p)];
+  }
   try {
     VidHubRunner.start({
-      adaptive: false, // Short fixed-frequency validation first; adaptive mode remains experimental.
+      durationMs: duration, adaptive: false, checkpoint: state.checkpoint, scope: b.scope,
       now: () => Date.now(), schedule: (fn, delay) => setTimeout(fn, delay),
-      checkpoint: saved, scope: deployment.scope,
       read: callback => {
+        const begin = Date.now();
+        if (begin >= state.endMs || begin >= b.hardStopMs) { callback(new Error('trial_expired')); return; }
         $httpAPI('GET', '/v1/requests/active', null, result => {
-          let targets;
-          try { targets = adapt(result); }
-          catch (_) { callback(new Error('schema_error')); return; }
-          callback(null, targets);
+          const end = Date.now();
+          if (finished || end >= state.endMs || end >= b.hardStopMs) return;
+          const midpoint = (begin + end) / 2;
+          if (latencies.length < 300) latencies.push(end - begin);
+          if (lastMidpoint !== null && intervals.length < 300) intervals.push(midpoint - lastMidpoint);
+          if (firstMidpoint === null) firstMidpoint = midpoint;
+          lastMidpoint = midpoint;
+          try { callback(null, adapt(result)); }
+          catch (_) { callback(new Error('schema_error')); }
         });
       },
-      save: snapshot => $persistentStore.write(snapshot, key) === true,
+      onPoint: point => {
+        states[point.state] = (states[point.state] || 0) + 1;
+        if (Number.isSafeInteger(point.observed_received_bytes)) {
+          if (previousTotal !== null) growth += Math.max(0, point.observed_received_bytes - previousTotal);
+          previousTotal = point.observed_received_bytes;
+        }
+      },
+      // Runner persistence is staged in memory and committed together with the trial report.
+      save: checkpoint => { savedCheckpoint = checkpoint; return false; },
       done: summary => {
-        // Bounded operational metadata only; never log API responses or URLs.
-        console.log(JSON.stringify(summary)); done();
+        try {
+          const current = readState();
+          if (!current || current.owner !== session || current.runs !== state.runs) {
+            done('trial_ownership_changed'); return;
+          }
+          const report = Object.assign({}, summary, {run: state.runs, startedMs: started,
+            endedMs: Date.now(), firstMidpointMs: firstMidpoint, lastMidpointMs: lastMidpoint,
+            handoffGapMs: previousReport && firstMidpoint !== null && previousReport.lastMidpointMs !== null
+              ? firstMidpoint - previousReport.lastMidpointMs : null,
+            states, receivedBytes: growth, apiP50Ms: percentile(latencies, .5), apiP95Ms: percentile(latencies, .95),
+            intervalP50Ms: percentile(intervals, .5), intervalMaxMs: intervals.length ? Math.max(...intervals) : null});
+          state.checkpoint = savedCheckpoint;
+          state.lastEndMs = report.endedMs;
+          state.owner = null; state.leaseUntilMs = 0;
+          state.halted = summary.reason !== 'batch_complete';
+          state.reports.push(report);
+          // Actual durable persistence is separate from the runner's staged save.
+          report.trialStatePersisted = true;
+          if (!writeState(state)) { done('trial_report_storage_failed'); return; }
+          console.log(JSON.stringify({trial: true, report})); done();
+        } catch (_) { done('trial_report_failed'); }
       }
     });
-  } catch (_) { done(); }
+  } catch (_) { done('trial_start_failed'); }
 }());
 
 }());

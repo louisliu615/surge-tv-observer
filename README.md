@@ -1,23 +1,21 @@
-# Surge tvOS read-only download observer
+# Surge tvOS finite read-only observer trial
 
-Publication candidate, not deployed or enabled. This observer reads local request
-byte counters. It has no connection-control API and sends no telemetry.
+Reads only internal GET /v1/requests/active. No connection-control API, external
+network calls, notifications, or telemetry. No private device or target values
+are embedded. All bindings are percent-encoded JSON in the private argument.
 
-Private target hostname, device name, build constraint, and checkpoint scope are
-provided through Surge's `argument` setting as percent-encoded JSON. No argument,
-invalid arguments, or either enable gate set to false results in immediate exit.
-The only accepted port is 443, and hostname/device matching is exact.
+This trial accepts the original binding fields plus trialId, latestStartMs and
+hardStopMs. Both enable gates must be true, and platform/build must match. It runs
+at most ten batches over five minutes from its first start, subject to a fixed
+absolute expiry. Each batch ends within 29.7 seconds. Counter history and bounded
+reports are persisted locally; malformed storage or unfinished batches stop work.
+The lease guard is not a proven atomic lock, so it cannot authorize actions.
 
-It reads only the internal GET /v1/requests/active API. Runtime byte history and
-connection IDs stay in local memory/persistent storage; operational summaries stay
-in local Surge logs. This file contains neither an API password nor subscription
-URLs, LAN/tailnet addresses, device identifiers, or a configured video hostname.
+After expiry, future cron launches return without sampling. Disable the cron
+declaration after the trial to remove even those empty launches. This is not an
+automatically self-removing scheduled task. Power consumption is not measured.
 
-The observation algorithm and short runtime have been tested separately. This
-parameterized publication wrapper has local tests; its private argument delivery
-and long-running scheduler still need device validation. No performance or
-reconnection benefit is promised. Do not enable it merely because it is hosted.
-
-Publish only this directory's three files into a separate repository, never the
-parent workspace. Pin the downloaded script to a reviewed commit and compare the
-downloaded content with SHA256SUMS. Do not upload private configuration or samples.
+The detector and adapter are unchanged from the prior tested observer; this
+wrapper adds duration limits, durable batch reports and handoff timing. Pin the
+script to a reviewed commit and verify SHA256SUMS. Never upload private arguments,
+configuration, samples or state. Publishing does not enable any device.
