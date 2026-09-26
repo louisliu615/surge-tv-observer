@@ -468,14 +468,134 @@
   return {create, endpoint};
 }));
 
-/* Five-minute read-only scheduler validation. No connection-control API. */
+/* Bounded local evidence only. It cannot alter detector decisions or perform I/O. */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.VidHubEvidence = factory();
+}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+  const LIMITS = Object.freeze({preMs: 3000, postMs: 2000, samples: 64, events: 12, bytes: 32768});
+  const STATES = ['WAIT', 'SETTLING', 'DOWNLOAD', 'UNCERTAIN'];
+  const REASONS = ['waiting_or_uncertain_or_protected', 'settling_no_candidate',
+    'insufficient_speed_evidence', 'window_speed_recovered', 'already_recorded_this_episode',
+    'confirming_low_speed', 'current_growth_not_substantial', 'bounded_recovery_observation',
+    'start_one_recovery_observation', 'productive_low_speed_candidate', 'invalid_sample',
+    'invalid_row', 'invalid_target_counter_or_id', 'invalid_target_status', 'target_capacity',
+    'non_increasing_clock', 'counter_precision_limit', 'history_capacity'];
+  const STATUSES = ['open', 'complete', 'sample_cap', 'trial_end', 'halted', 'post_gap'];
+  const integer = n => Number.isSafeInteger(n) && n >= 0;
+  const finite = n => typeof n === 'number' && Number.isFinite(n);
+  const numeric = n => n === null || finite(n);
+  const keys = (x, list) => x && !Array.isArray(x) && Object.keys(x).sort().join() === list.slice().sort().join();
+  // Every persisted character is ASCII: fixed keys/enums plus numbers, never raw strings.
+  const size = x => JSON.stringify(x).length;
+  const number = n => finite(n) ? n : null;
+  function validSample(s) {
+    return Array.isArray(s) && s.length === 9 && finite(s[0]) && s[0] >= 0 &&
+      finite(s[1]) && s[1] >= 0 && Array.isArray(s[2]) && s[2].length <= 8 &&
+      s[2].every(p => Array.isArray(p) && p.length === 2 && p.every(integer)) &&
+      new Set(s[2].map(p => p[0])).size === s[2].length &&
+      Number.isInteger(s[3]) && s[3] >= 0 && s[3] < STATES.length &&
+      Number.isInteger(s[4]) && s[4] >= 0 && s[4] <= 7 &&
+      Number.isInteger(s[5]) && s[5] >= 0 && s[5] < REASONS.length &&
+      numeric(s[6]) && numeric(s[7]) && (s[8] === null || integer(s[8]));
+  }
+  const ordered = rows => rows.length <= LIMITS.samples &&
+    rows.every((s, i) => validSample(s) && (!i || s[0] > rows[i-1][0]));
+  class Evidence {
+    constructor(binding, originMs) {
+      if (!binding || !integer(originMs)) throw new Error('invalid_evidence_origin');
+      this.binding = binding;
+      this.s = {version: 1, originMs, lastMs: null, seenCandidates: 0, droppedEvents: 0,
+        omittedFrames: 0, ring: [], events: []};
+    }
+    restore(value) {
+      try {
+        const x = JSON.parse(JSON.stringify(value));
+        if (!keys(x, Object.keys(this.s)) || size(x) > LIMITS.bytes || x.version !== 1 ||
+            x.originMs !== this.s.originMs || !numeric(x.lastMs) ||
+            (x.lastMs !== null && x.lastMs < 0) ||
+            ![x.seenCandidates, x.droppedEvents, x.omittedFrames].every(integer) ||
+            !Array.isArray(x.ring) || !ordered(x.ring) || !Array.isArray(x.events) ||
+            x.events.length > LIMITS.events || x.seenCandidates !== x.droppedEvents + x.events.length) return false;
+        for (let i = 0; i < x.events.length; i++) {
+          const e = x.events[i];
+          if (!keys(e, ['ordinal','atMs','preTruncated','status','decision','samples']) ||
+              !integer(e.ordinal) || !e.ordinal || e.ordinal > x.seenCandidates ||
+              (i && e.ordinal <= x.events[i-1].ordinal) || !finite(e.atMs) || e.atMs < 0 ||
+              typeof e.preTruncated !== 'boolean' || !STATUSES.includes(e.status) ||
+              !Array.isArray(e.decision) || e.decision.length !== 5 || !e.decision.every(numeric) ||
+              !Array.isArray(e.samples) || !ordered(e.samples) ||
+              !e.samples.some(s => s[0] === e.atMs && (s[4] & 1)) ||
+              e.samples.some(s => s[0] > e.atMs + LIMITS.postMs + 500)) return false;
+        }
+        if ([...x.ring, ...x.events.flatMap(e => e.samples)].some(s => x.lastMs === null || s[0] > x.lastMs)) return false;
+        this.s = x; return true;
+      } catch (_) { return false; }
+    }
+    add(frame, point) {
+      const s = this.s, b = this.binding;
+      // Milliseconds retain the read midpoint, including half milliseconds.
+      const atMs = frame && frame.time_s * 1000 - s.originMs;
+      if (!finite(atMs) || atMs < 0 || !Array.isArray(frame.targets) || !point ||
+          frame.targets.some(r => !r || typeof r !== 'object') ||
+          (s.lastMs !== null && atMs <= s.lastMs)) {
+        s.omittedFrames++; return;
+      }
+      const rows = frame.targets.filter(r => r.host === b.host && r.port === b.port &&
+        r.local === true && r.deviceName === b.deviceName && r.completed === false && r.failed === false)
+        .map(r => [r.id, r.inBytes]);
+      const sample = [atMs, frame.read_ms, rows, STATES.indexOf(point.state),
+        (point.candidate ? 1 : 0) | (point.protected ? 2 : 0) | (point.reliable_read ? 4 : 0),
+        REASONS.indexOf(point.decision_reason), number(point.phase_rate_Bps),
+        number(point.short_rate_Bps), point.main_id ?? null];
+      if (!validSample(sample)) { s.omittedFrames++; return; }
+      s.lastMs = atMs;
+      s.ring.push(sample);
+      while (s.ring.length > LIMITS.samples ||
+          (s.ring.length > 1 && s.ring[1][0] <= atMs - LIMITS.preMs)) s.ring.shift();
+      for (const e of s.events) {
+        if (e.status !== 'open') continue;
+        // A later callback after a long gap cannot fill missing post-event evidence.
+        if (atMs > e.atMs + LIMITS.postMs + 500) { e.status = 'post_gap'; continue; }
+        if (e.samples.length >= LIMITS.samples) { e.status = 'sample_cap'; continue; }
+        e.samples.push(sample);
+        if (atMs >= e.atMs + LIMITS.postMs) e.status = 'complete';
+      }
+      if (point.candidate) {
+        s.seenCandidates++;
+        s.events.push({ordinal: s.seenCandidates, atMs,
+          preTruncated: s.ring[0][0] > atMs - LIMITS.preMs,
+          status: 'open', decision: [number(point.elapsed_s), number(point.low_since_s),
+            number(point.hold_until_s), number(point.main_delta_bytes), number(point.current_growth_floor_bytes)],
+          samples: s.ring.slice()});
+        if (s.events.length > LIMITS.events) { s.events.shift(); s.droppedEvents++; }
+      }
+    }
+    finish(reason) {
+      for (const e of this.s.events) if (e.status === 'open') e.status = reason === 'trial_end' ? 'trial_end' : 'halted';
+    }
+    snapshot(budget = LIMITS.bytes) {
+      if (!integer(budget) || budget < 512) throw new Error('evidence_budget_too_small');
+      budget = Math.min(budget, LIMITS.bytes);
+      // Serialize only when a batch is saved, never on every 100 ms observation.
+      // Evict complete contexts as units, with explicit counts; do not imply lost data exists.
+      while (size(this.s) > budget && this.s.events.length) { this.s.events.shift(); this.s.droppedEvents++; }
+      while (size(this.s) > budget && this.s.ring.length) this.s.ring.shift();
+      return JSON.parse(JSON.stringify(this.s));
+    }
+  }
+  return {Evidence, LIMITS, STATES, REASONS, STATUSES};
+}));
+
+/* Local candidate evidence wrapper. No connection-control API. */
 (function () {
   'use strict';
   const started = Date.now();
   const periodMs = 30000, finishReserveMs = 300, minimumBudgetMs = 100;
   const nextBoundaryMs = (Math.floor(started / periodMs) + 1) * periodMs;
   const b = __binding, key = 'vidhub-trial-' + b.trialId;
-  let finished = false;
+  let finished = false, evidence = null, observedFrame = null;
   function done(reason) {
     if (finished) return;
     finished = true;
@@ -489,6 +609,10 @@
     return JSON.parse(raw);
   }
   function writeState(value) {
+    if (evidence) {
+      const base = Object.assign({}, value, {audit: null});
+      value.audit = evidence.snapshot(Math.min(32768, 65536 - VidHubRunner.byteLength(JSON.stringify(base)) - 64));
+    }
     const raw = JSON.stringify(value);
     return VidHubRunner.byteLength(raw) <= 65536 &&
       $persistentStore.write(raw, key) === true && $persistentStore.read(key) === raw;
@@ -501,14 +625,14 @@
     state = readState();
     if (state === null) {
       if (started > b.latestStartMs) { done('trial_start_window_closed'); return; }
-      state = {version: 1, trialId: b.trialId, scope: b.scope, startMs: started,
+      state = {version: 2, trialId: b.trialId, scope: b.scope, startMs: started,
         endMs: Math.min(started + 300000, b.hardStopMs), runs: 0, lastEndMs: started,
-        leaseUntilMs: 0, owner: null, halted: false, checkpoint: null, reports: []};
+        leaseUntilMs: 0, owner: null, halted: false, checkpoint: null, reports: [], audit: null};
     }
     const fields = ['version','trialId','scope','startMs','endMs','runs','lastEndMs',
-      'leaseUntilMs','owner','halted','checkpoint','reports'];
+      'leaseUntilMs','owner','halted','checkpoint','reports','audit'];
     if (!state || Object.keys(state).sort().join() !== fields.sort().join() ||
-        state.version !== 1 || state.trialId !== b.trialId || state.scope !== b.scope ||
+        state.version !== 2 || state.trialId !== b.trialId || state.scope !== b.scope ||
         !Number.isSafeInteger(state.startMs) || !Number.isSafeInteger(state.endMs) ||
         state.endMs !== Math.min(state.startMs + 300000, b.hardStopMs) ||
         !Number.isSafeInteger(state.lastEndMs) || !Number.isSafeInteger(state.leaseUntilMs) ||
@@ -523,6 +647,9 @@
       // A crashed/unfinished batch ends this trial; it is never silently taken over.
       done(started < state.leaseUntilMs ? 'trial_overlap_guard' : 'trial_unfinished_batch'); return;
     }
+    evidence = new VidHubEvidence.Evidence(b, state.startMs);
+    if (state.audit !== null && !evidence.restore(state.audit)) throw new Error();
+    if (state.runs > 0 && state.audit === null) throw new Error();
     // A late cron launch gets a shorter batch, never a later slot boundary.
     // The reserve leaves time for checkpoint/report storage; it is not a speed window.
     plannedEndMs = Math.min(started + 29700, nextBoundaryMs - finishReserveMs,
@@ -602,11 +729,16 @@
           if (lastMidpoint !== null && intervals.length < 300) intervals.push(midpoint - lastMidpoint);
           if (firstMidpoint === null) firstMidpoint = midpoint;
           lastMidpoint = midpoint;
-          try { callback(null, adapt(result)); }
+          try {
+            const targets = adapt(result);
+            observedFrame = {time_s: midpoint / 1000, read_ms: end - begin, targets};
+            callback(null, targets);
+          }
           catch (_) { callback(new Error('schema_error')); }
         });
       },
       onPoint: point => {
+        if (observedFrame) evidence.add(observedFrame, point);
         states[point.state] = (states[point.state] || 0) + 1;
         if (Number.isSafeInteger(point.observed_received_bytes)) {
           if (previousTotal !== null) growth += Math.max(0, point.observed_received_bytes - previousTotal);
@@ -633,6 +765,8 @@
           state.owner = null; state.leaseUntilMs = 0;
           state.halted = summary.reason !== 'batch_complete';
           state.reports.push(report);
+          if (state.halted || state.runs >= 10 || plannedEndMs >= state.endMs)
+            evidence.finish(state.halted ? 'halted' : 'trial_end');
           // Actual durable persistence is separate from the runner's staged save.
           report.trialStatePersisted = true;
           if (!writeState(state)) { done('trial_report_storage_failed'); return; }
