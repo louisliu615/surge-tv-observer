@@ -472,6 +472,8 @@
 (function () {
   'use strict';
   const started = Date.now();
+  const periodMs = 30000, finishReserveMs = 300, minimumBudgetMs = 100;
+  const nextBoundaryMs = (Math.floor(started / periodMs) + 1) * periodMs;
   const b = __binding, key = 'vidhub-trial-' + b.trialId;
   let finished = false;
   function done(reason) {
@@ -494,7 +496,7 @@
   const session = typeof $script === 'object' && $script.sessionID;
   if (typeof session !== 'string' || session.length < 1 || session.length > 80 ||
       !Number.isSafeInteger(started) || started >= b.hardStopMs) { done('trial_expired_or_missing_session'); return; }
-  let state;
+  let state, plannedEndMs, beforeClaimMs;
   try {
     state = readState();
     if (state === null) {
@@ -521,13 +523,35 @@
       // A crashed/unfinished batch ends this trial; it is never silently taken over.
       done(started < state.leaseUntilMs ? 'trial_overlap_guard' : 'trial_unfinished_batch'); return;
     }
+    // A late cron launch gets a shorter batch, never a later slot boundary.
+    // The reserve leaves time for checkpoint/report storage; it is not a speed window.
+    plannedEndMs = Math.min(started + 29700, nextBoundaryMs - finishReserveMs,
+      state.endMs, b.hardStopMs);
+    beforeClaimMs = Date.now();
+    if (!Number.isSafeInteger(beforeClaimMs) || beforeClaimMs < started) {
+      done('trial_clock_backwards'); return;
+    }
+    if (plannedEndMs - beforeClaimMs < minimumBudgetMs) {
+      done('trial_slot_budget_exhausted'); return;
+    }
     state.runs++;
     state.owner = session;
     state.leaseUntilMs = started + 30000;
     if (!writeState(state)) { done('trial_storage_unavailable'); return; }
   } catch (_) { done('trial_invalid_storage'); return; }
-  const duration = Math.min(29700, state.endMs - started);
-  if (duration < 100) { done('trial_complete'); return; }
+  function releaseUnstarted(reason, halt) {
+    try {
+      const current = readState();
+      if (!current || current.owner !== session || current.runs !== state.runs) {
+        done('trial_ownership_changed'); return;
+      }
+      // Storage/setup may have consumed the slot. Leave no orphan owner or phantom run.
+      state.runs--; state.owner = null; state.leaseUntilMs = 0;
+      state.halted = halt;
+      if (!writeState(state)) { done('trial_release_storage_failed'); return; }
+      done(reason);
+    } catch (_) { done('trial_release_storage_failed'); }
+  }
   const schema = {verified: true, rowsPath: ['requests'], fields: {
     id: ['id'], url: ['URL'], inBytes: ['inBytes'], local: ['local'],
     deviceName: ['deviceName'], completed: ['completed'], failed: ['failed']
@@ -546,15 +570,33 @@
     return sorted[Math.round((sorted.length - 1) * p)];
   }
   try {
+    // Measure the remaining budget after synchronous storage and setup, not before.
+    const runnerStartedMs = Date.now();
+    if (!Number.isSafeInteger(runnerStartedMs) || runnerStartedMs < beforeClaimMs) {
+      releaseUnstarted('trial_clock_backwards', true); return;
+    }
+    const duration = plannedEndMs - runnerStartedMs;
+    if (duration < minimumBudgetMs) {
+      releaseUnstarted('trial_slot_budget_exhausted', false); return;
+    }
+    let firstClock = true;
     VidHubRunner.start({
       durationMs: duration, adaptive: false, checkpoint: state.checkpoint, scope: b.scope,
-      now: () => Date.now(), schedule: (fn, delay) => setTimeout(fn, delay),
+      // Anchor the unchanged runner's relative deadline to this measured start.
+      // Clamp timers too, so its own initialization cannot push the deadline later.
+      now: () => { if (firstClock) { firstClock = false; return runnerStartedMs; } return Date.now(); },
+      schedule: (fn, delay) => setTimeout(fn, Math.max(0, Math.min(delay, plannedEndMs - Date.now()))),
       read: callback => {
         const begin = Date.now();
-        if (begin >= state.endMs || begin >= b.hardStopMs) { callback(new Error('trial_expired')); return; }
+        if (begin >= plannedEndMs) { callback(new Error('trial_expired')); return; }
+        let replied = false;
         $httpAPI('GET', '/v1/requests/active', null, result => {
           const end = Date.now();
-          if (finished || end >= state.endMs || end >= b.hardStopMs) return;
+          if (finished || replied) return;
+          replied = true;
+          if (!Number.isSafeInteger(end) || end < begin || end >= plannedEndMs) {
+            callback(new Error('trial_clock_or_deadline')); return;
+          }
           const midpoint = (begin + end) / 2;
           if (latencies.length < 300) latencies.push(end - begin);
           if (lastMidpoint !== null && intervals.length < 300) intervals.push(midpoint - lastMidpoint);
@@ -580,6 +622,7 @@
             done('trial_ownership_changed'); return;
           }
           const report = Object.assign({}, summary, {run: state.runs, startedMs: started,
+            runnerStartedMs, nextBoundaryMs, plannedEndMs,
             endedMs: Date.now(), firstMidpointMs: firstMidpoint, lastMidpointMs: lastMidpoint,
             handoffGapMs: previousReport && firstMidpoint !== null && previousReport.lastMidpointMs !== null
               ? firstMidpoint - previousReport.lastMidpointMs : null,
