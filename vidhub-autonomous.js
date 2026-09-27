@@ -1,4 +1,4 @@
-// Configured, finite autonomous TV candidate. Active release gate is closed.
+// Version e8f26578d62f5739c10b8036b7c5657b28c46cb7c74097da6b5636817cf98d3e; phase: read-only job-service candidate, actions disabled.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,9 +10,9 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="e785435562d6838ed4298e6cfb98038b76b28a2edbd6d9e2f7375642cdb34e5b";
+const __codeId="e8f26578d62f5739c10b8036b7c5657b28c46cb7c74097da6b5636817cf98d3e";
 const __capabilities=Object.freeze({"actionsQualified": false});
-__factories["implementation/detector"]=function(module,exports,require){
+__factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -268,7 +268,7 @@ __factories["implementation/detector"]=function(module,exports,require){
 }));
 
 };
-__factories["implementation/adapter"]=function(module,exports,require){
+__factories["src/core/adapter"]=function(module,exports,require){
 /* Strict mapping of the verified TV response, including opaque TLS authorities. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -331,7 +331,7 @@ __factories["implementation/adapter"]=function(module,exports,require){
 }));
 
 };
-__factories["implementation/runner"]=function(module,exports,require){
+__factories["src/core/runner"]=function(module,exports,require){
 /* Finite read-only worker. Dependencies are injected; no Surge globals here. */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory(require('./detector'));
@@ -459,7 +459,7 @@ __factories["implementation/runner"]=function(module,exports,require){
 }));
 
 };
-__factories["experiments/retry-rearm-policy"]=function(module,exports,require){
+__factories["src/policy/retry-rearm-policy"]=function(module,exports,require){
 // Offline candidate only. No controller, network, authorization or action I/O.
 // A fixed window follows our own action. The original detector, successor
 // identity check and final revalidation remain necessary for any real action.
@@ -511,7 +511,7 @@ class RetryRearm {
 module.exports={RetryRearm,DEFAULTS};
 
 };
-__factories["experiments/download-startup-policy"]=function(module,exports,require){
+__factories["src/policy/download-startup-policy"]=function(module,exports,require){
 // Offline candidate only. Raw filtered counters and existing detector output in;
 // an additional startup veto out. No network, timers, controller, or action I/O.
 'use strict';
@@ -636,13 +636,13 @@ class DownloadStartup {
 module.exports={DownloadStartup,DEFAULTS};
 
 };
-__factories["tv-integration/pipeline"]=function(module,exports,require){
+__factories["src/pipeline"]=function(module,exports,require){
 'use strict';
 // Pure TV decision pipeline. The executed historical modules remain unchanged.
-const {Detector}=require('../implementation/detector');
-const {create}=require('../implementation/adapter');
-const {RetryRearm}=require('../experiments/retry-rearm-policy');
-const {DownloadStartup}=require('../experiments/download-startup-policy');
+const {Detector}=require('./core/detector');
+const {create}=require('./core/adapter');
+const {RetryRearm}=require('./policy/retry-rearm-policy');
+const {DownloadStartup}=require('./policy/download-startup-policy');
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const POLICY=Object.freeze({startup_s:4,near_zero_Bps:40960,quiet_window_s:.4,quiet_confirm_s:.6});
@@ -772,7 +772,7 @@ class Pipeline{
 module.exports={Pipeline,MeasurementGate,Replacement,POLICY,fingerprint};
 
 };
-__factories["tv-autonomous/ownership"]=function(module,exports,require){
+__factories["src/autonomous/ownership"]=function(module,exports,require){
 'use strict';
 // One-shot splitter, NOT a reusable read/write lease. Each generation uses new
 // registers, never reopened/deleted by a running worker. The at-most-one-winner
@@ -835,9 +835,9 @@ function begin(store,parent,runId,sessionId,codeId,makeState){
 module.exports={PREFIX,HEAD,key,splitter,claim,parse,head,begin};
 
 };
-__factories["tv-autonomous/snapshot"]=function(module,exports,require){
+__factories["src/autonomous/snapshot"]=function(module,exports,require){
 'use strict';
-const {Pipeline,Replacement}=require('../tv-integration/pipeline');
+const {Pipeline,Replacement}=require('../pipeline');
 const copy=x=>JSON.parse(JSON.stringify(x));
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
@@ -921,11 +921,11 @@ function restore(x){
 module.exports={capture,restore,inspectJSON};
 
 };
-__factories["tv-autonomous/runtime"]=function(module,exports,require){
+__factories["src/autonomous/runtime"]=function(module,exports,require){
 'use strict';
-const {Pipeline,fingerprint}=require('../tv-integration/pipeline');
-const {endpoint}=require('../implementation/adapter');
-const {byteLength}=require('../implementation/runner');
+const {Pipeline,fingerprint}=require('../pipeline');
+const {endpoint}=require('../core/adapter');
+const {byteLength}=require('../core/runner');
 const ownership=require('./ownership');
 const snapshots=require('./snapshot');
 const PERIOD=120000,RESERVE=300,MAX_STATE=524288;
@@ -935,6 +935,7 @@ const copy=x=>JSON.parse(JSON.stringify(x));
 function validate(b){
   const keys=['enabled','runId','mode','host','deviceName','expectedBuild','expectedModel','notBeforeMs',
     'latestStartMs','expiresMs','durationMs','referenceMs','tailMs','maxAttempts','diagnostic'];
+  if(b&&Object.prototype.hasOwnProperty.call(b,'waitTargetMs'))keys.push('waitTargetMs');
   if(!b||Object.keys(b).sort().join()!==keys.sort().join()||b.enabled!==true||
     !/^[a-z0-9-]{16,80}$/.test(b.runId)||!['observe','execute','diagnostic'].includes(b.mode)||
     typeof b.host!=='string'||!b.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
@@ -945,7 +946,8 @@ function validate(b){
     b.latestStartMs<=b.notBeforeMs||b.latestStartMs-b.notBeforeMs>300000||
     b.expiresMs<=b.latestStartMs||b.expiresMs-b.notBeforeMs>1200000||
     b.durationMs<5000||b.durationMs>900000||b.referenceMs+b.tailMs>=b.durationMs||
-    b.maxAttempts>30||(b.mode==='observe'&&b.maxAttempts!==0)||(b.mode==='execute'&&b.maxAttempts<1))
+    b.maxAttempts>30||(b.mode==='observe'&&b.maxAttempts!==0)||(b.mode==='execute'&&b.maxAttempts<1)||
+    ('waitTargetMs' in b&&(!integer(b.waitTargetMs)||b.waitTargetMs<1000||b.waitTargetMs>300000)))
     throw Error('invalid_configuration');
   if(b.mode==='diagnostic'){
     const d=b.diagnostic;
@@ -1099,7 +1101,7 @@ function start(o){
     const t=now();if(store.read(ownership.HEAD)!==owned){finish('ownership_changed');return;}
     if(signals()){finish('operator_stop');return;}
     if(t>=b.expiresMs||phase(t)==='ended'){finish('trial_complete');return;}
-    if(state.originMs===null&&t-state.runStartedMs>=120000){finish('no_target_within_wait_budget');return;}
+    if(state.originMs===null&&t-state.runStartedMs>=(b.waitTargetMs??120000)){finish('no_target_within_wait_budget');return;}
     if(t>=sessionDeadline){finish('normal_yield',true);return;}
     const generation=++token;let replied=false;
     later(()=>{if(!replied&&generation===token)finish('read_timeout');},1000);
@@ -1142,6 +1144,335 @@ function start(o){
 module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
 
 };
+__factories["src/autonomous/jobs"]=function(module,exports,require){
+// Job protocol v2 candidate: bounded read-only tasks, independent of deployment time.
+'use strict';
+const owner=require('./ownership');
+const PERIOD=120000;
+const copy=x=>JSON.parse(JSON.stringify(x));
+const canonical=x=>x===null||typeof x!=='object'?JSON.stringify(x):Array.isArray(x)?
+  '['+x.map(canonical).join(',')+']':'{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}';
+const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).sort().join()===keys.split(',').sort().join();
+const integer=x=>Number.isSafeInteger(x)&&x>=0;
+const id=x=>typeof x==='string'&&/^[a-z0-9-]{16,64}$/.test(x);
+function validateService(s){
+  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel')||s.protocol!==2||!id(s.installationId)||
+    typeof s.host!=='string'||s.host.length>253||!s.host.includes('.')||
+    !s.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
+    typeof s.deviceName!=='string'||!s.deviceName.length||s.deviceName.length>64||
+    typeof s.expectedBuild!=='string'||!/^\d{1,10}$/.test(s.expectedBuild)||
+    typeof s.expectedModel!=='string'||!s.expectedModel.length||s.expectedModel.length>64)throw Error('invalid_service');
+  return s;
+}
+function validateTask(t){
+  if(!exact(t,'runId,kind,delayMs,startGraceMs,waitTargetMs,durationMs')||!id(t.runId)||
+    !['observe','probe'].includes(t.kind)||!['delayMs','startGraceMs','waitTargetMs','durationMs'].every(k=>integer(t[k]))||
+    t.delayMs>86400000||t.startGraceMs<PERIOD||t.startGraceMs>1800000||
+    (t.kind==='observe'&&(t.durationMs<5000||t.durationMs>900000||t.waitTargetMs<1000||t.waitTargetMs>300000||
+      t.waitTargetMs+t.durationMs>1200000))||
+    (t.kind==='probe'&&(t.waitTargetMs!==0||t.durationMs!==PERIOD)))throw Error('invalid_task');
+  return t;
+}
+function bindingFor(s,t,now){
+  const end=now+t.waitTargetMs+t.durationMs;
+  return {enabled:true,runId:t.runId,mode:'observe',host:s.host,deviceName:s.deviceName,
+    expectedBuild:s.expectedBuild,expectedModel:s.expectedModel,notBeforeMs:now,
+    latestStartMs:Math.min(now+PERIOD,end-1),expiresMs:end,durationMs:t.durationMs,
+    waitTargetMs:t.waitTargetMs,referenceMs:0,tailMs:0,maxAttempts:0,diagnostic:null};
+}
+function validateLedger(state,s){
+  if(!Array.isArray(state.history)||state.history.length>16)throw Error('invalid_job_ledger');
+  const records=[state.current,...state.history].filter(x=>x!==null),ids=new Set();
+  for(const j of records){
+    validateTask(j.task);
+    if(ids.has(j.task.runId)||!['pending','running','stopping','cancelled','expired','finished'].includes(j.phase)||
+      ![j.receivedMs,j.notBeforeMs,j.startByMs].every(integer)||j.notBeforeMs!==j.receivedMs+j.task.delayMs||
+      j.startByMs!==j.notBeforeMs+j.task.startGraceMs)throw Error('invalid_job_ledger');
+    ids.add(j.task.runId);
+    if(j.binding!==null&&(!integer(j.startedMs)||j.task.kind!=='observe'||
+      canonical(j.binding)!==canonical(bindingFor(s,j.task,j.startedMs))))throw Error('invalid_saved_binding');
+    if(['pending','expired'].includes(j.phase)&&(j.binding!==null||j.probeAtMs!==null))throw Error('invalid_pending_job');
+    if(['running','stopping','finished'].includes(j.phase)&&
+      (!integer(j.startedMs)||j.startedMs<j.notBeforeMs||j.startedMs>j.startByMs||
+       (j.task.kind==='observe'&&j.binding===null)||
+       (j.task.kind==='probe'&&j.probeAtMs!==Math.floor(j.startedMs/PERIOD)*PERIOD+5000)))throw Error('invalid_started_job');
+  }
+}
+function context(s,o){
+  validateService(s);
+  if(!/^[a-f0-9]{64}$/.test(o.codeId)||!ownerIdentity(o.sessionId)||!integer(o.now()))throw Error('invalid_job_context');
+  const prefix='vidhub-jobs-v2-'+s.installationId;
+  // Separate one-shot generations serialize control/admission across JSCs. No
+  // expiring lock, blanket reset or automatic reuse of an interrupted claim.
+  const map=k=>prefix+k.slice(owner.PREFIX.length);
+  const store={read:k=>o.read(map(k)),write:(k,v)=>o.write(v,map(k))};
+  const key=(run,suffix)=>prefix+'-'+run+'-'+suffix;
+  const put=(k,v)=>{if(o.write(v,k)!==true||o.read(k)!==v)throw Error('job_write_unconfirmed');};
+  function head(){
+    const h=owner.head(store);
+    if(h.state&&(h.state.codeId!==o.codeId||h.state.service!==canonical(s)||!integer(h.state.clockMs)||
+      o.now()<h.state.clockMs))throw Error('job_service_or_clock_changed');
+    if(h.state)validateLedger(h.state,s);
+    return h;
+  }
+  function transaction(fn){
+    const h=head(),state=h.state?copy(h.state):{current:null,history:[]};
+    const next=fn(state); // All validation before consuming a one-shot claim.
+    const claimed=owner.begin(store,h,s.installationId,o.sessionId,o.codeId,header=>({
+      ...header,closed:true,terminal:true,service:canonical(s),clockMs:o.now(),current:next.current,history:next.history}));
+    if(!claimed.accepted)throw Error('job_control_busy');
+    return claimed.state;
+  }
+  return {head,transaction,key,put};
+}
+function ownerIdentity(x){return typeof x==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(x);}
+function stopKey(run){return owner.PREFIX+'-'+run+'-stop';}
+function runtimeState(o,j){
+  if(j.resultKey){
+    const s=owner.parse(o.read(j.resultKey));
+    if(s.runId!==j.task.runId||s.codeId!==o.codeId||!s.closed||!s.terminal||
+      canonical(JSON.parse(s.binding))!==canonical(j.binding))throw Error('job_saved_result_mismatch');
+    return s;
+  }
+  const h=owner.head({read:o.read});
+  if(!h.state||h.state.runId!==j.task.runId)return null;
+  if(h.state.codeId!==o.codeId||canonical(JSON.parse(h.state.binding))!==canonical(j.binding))throw Error('job_runtime_mismatch');
+  if(o.read(owner.HEAD)!==h.raw)throw Error('job_runtime_head_changed');
+  return h.state;
+}
+function status(s,o,runId=null){
+  const c=context(s,o),h=c.head(),j=h.state?.current;
+  const picked=runId&&j?.task.runId!==runId?h.state?.history.find(x=>x.task.runId===runId):j;
+  if(!picked)return {status:runId?'unknown_job':'idle',job:null};
+  const result=copy(picked);
+  if(result.phase==='pending'&&o.now()>result.startByMs)result.phase='expired';
+  let runtime=null;
+  if(result.task.kind==='observe'&&result.binding){
+    runtime=runtimeState(o,result);
+    if(runtime?.terminal&&runtime.closed){result.phase='finished';result.reason=runtime.reason;
+      result.resultKey=owner.key(runtime.generation,'state');}
+  }
+  if(result.task.kind==='probe'&&result.probeAtMs!==null&&o.now()>result.probeAtMs+112000&&
+    ['running','stopping'].includes(result.phase)){
+    const a=o.read(c.key(result.task.runId,'done-a')),b=o.read(c.key(result.task.runId,'done-b'));
+    result.phase='finished';result.reason=a==='probe_complete'&&b==='probe_complete'?'probe_records_ready':'probe_incomplete';
+  }
+  return {status:result.phase,job:result,runtime,nowMs:o.now()};
+}
+const terminal=j=>['cancelled','expired','finished'].includes(j.phase);
+function archive(state,j){state.history.push(j);if(state.history.length>16)state.history.shift();}
+function submit(s,o,t,replaces=null){
+  validateTask(t);if(replaces!==null&&!id(replaces))throw Error('invalid_replacement');
+  const c=context(s,o),prior=c.head().state,existing=[prior?.current,...(prior?.history||[])].find(j=>j?.task.runId===t.runId);
+  const spec=canonical(t),saved=o.read(c.key(t.runId,'spec'));
+  if(existing){
+    if(canonical(existing.task)!==spec)throw Error('run_id_payload_changed');
+    return {...status(s,o,t.runId),duplicate:true};
+  }
+  if(saved!==null)throw Error('run_id_retired_or_submission_unconfirmed');
+  if(o.read(owner.PREFIX+'-'+t.runId+'-root')!==null)throw Error('run_id_already_used_by_runtime');
+  // A committed head is the only admission source. A failed spec write poisons
+  // this ID; never retry it as a fresh task and silently move its time window.
+  const now=o.now();
+  const next=c.transaction(state=>{
+    let old=state.current;
+    if(old){
+      old=status(s,o,old.task.runId).job;
+      if(replaces!==null){
+        if(old.task.runId!==replaces||!['pending','expired'].includes(old.phase)||old.binding!==null)
+          throw Error('only_pending_job_can_be_replaced');
+        old.phase='cancelled';old.reason='rescheduled';
+      }else if(!terminal(old))throw Error('previous_job_not_finished');
+      archive(state,old);
+    }else if(replaces!==null)throw Error('replacement_job_missing');
+    state.current={task:copy(t),receivedMs:now,notBeforeMs:now+t.delayMs,startByMs:now+t.delayMs+t.startGraceMs,
+      phase:'pending',binding:null,probeAtMs:null,reason:null};return state;
+  });
+  c.put(c.key(t.runId,'spec'),spec);
+  return {status:'pending',job:next.current,duplicate:false,received:true,started:false};
+}
+function cancel(s,o,runId){
+  if(!id(runId))throw Error('invalid_run_id');
+  const c=context(s,o),view=status(s,o,runId);
+  if(!view.job)throw Error('unknown_job');
+  if(terminal(view.job))return {...view,alreadyClosed:true,closureVerified:true};
+  // Stop is monotonic. Even if the following ledger commit fails, no reset is
+  // allowed; a worker sees the flag on its next check.
+  c.put(stopKey(runId),'set');c.put(c.key(runId,'cancel'),'set');
+  c.transaction(state=>{
+    if(state.current?.task.runId!==runId)throw Error('job_changed');
+    const j=state.current;
+    j.phase=j.phase==='pending'?'cancelled':'stopping';j.reason='operator_stop';return state;
+  });
+  const result=status(s,o,runId);
+  return {...result,closureVerified:result.status==='cancelled'||result.status==='finished'};
+}
+function admit(s,o,role){
+  if(!['worker','peer'].includes(role))throw Error('invalid_role');
+  const c=context(s,o),current=c.head().state?.current;
+  if(!current||terminal(current))return {reason:'idle'};
+  const view=status(s,o),j=view.job,now=o.now();
+  if(!j||terminal({...j,phase:view.status}))return {reason:'idle'};
+  if(j.phase==='stopping')return {job:j,reason:'stopping'};
+  if(j.task.kind==='observe'&&role==='peer')return {reason:'idle'};
+  if(now<j.notBeforeMs)return {reason:'waiting'};
+  if(j.phase!=='pending')return {job:j};
+  if(j.task.kind==='probe'&&now%PERIOD>1500)return {reason:'probe_waiting_boundary'};
+  const next=c.transaction(state=>{
+    if(state.current?.task.runId!==j.task.runId||state.current.phase!=='pending')throw Error('job_changed');
+    if(o.read(c.key(j.task.runId,'cancel'))!==null)throw Error('job_cancelled');
+    const x=state.current;x.phase='running';x.startedMs=now;
+    if(x.task.kind==='observe'){
+      x.binding=bindingFor(s,x.task,now);
+    }else x.probeAtMs=Math.floor(now/PERIOD)*PERIOD+5000;
+    return state;
+  });
+  return {job:next.current};
+}
+function complete(s,o,runId,reason){
+  const c=context(s,o);
+  return c.transaction(state=>{
+    if(state.current?.task.runId!==runId)throw Error('job_changed');
+    if(state.current.task.kind==='observe'){
+      const h=owner.head({read:o.read});
+      if(h.state?.runId===runId){
+        if(!h.state.closed||!h.state.terminal)throw Error('worker_not_closed');
+        state.current.resultKey=owner.key(h.state.generation,'state');
+      }else if(reason!=='operator_stop')throw Error('worker_result_missing');
+    }
+    state.current.phase='finished';state.current.reason=reason;state.current.endedMs=o.now();return state;
+  });
+}
+function control(q,o){
+  if(!exact(q,'requestId,operation,service,codeId,task,runId,replaces')||!/^[a-f0-9]{32}$/.test(q.requestId)||
+    !['submit','status','cancel','export'].includes(q.operation)||q.codeId!==o.codeId)throw Error('invalid_job_request');
+  const s=validateService(q.service);let result;
+  if(o.environment.system!=='tvOS'||String(o.environment['surge-build'])!==s.expectedBuild||
+    o.environment['device-model']!==s.expectedModel||o.scriptType!=='generic')throw Error('wrong_tv_environment');
+  if(q.operation==='submit'){
+    if(q.runId!==null)throw Error('invalid_job_request');result=submit(s,o,q.task,q.replaces);
+  }else{
+    if(q.task!==null||q.replaces!==null||(q.runId!==null&&!id(q.runId)))throw Error('invalid_job_request');
+    result=q.operation==='cancel'?cancel(s,o,q.runId):status(s,o,q.runId);
+    if(q.operation==='export'&&result.job?.task.kind==='probe'){
+      result.reports=[];
+      for(let i=0;i<12;i++)for(const role of ['a','b']){
+        const raw=o.read('vidhub-own-probe-'+result.job.task.runId+'-r'+i+'-'+role);
+        if(raw!==null){const r=owner.parse(raw,8192);
+          if(r.runId!==result.job.task.runId||r.round!==i||r.role!==role)throw Error('probe_record_mismatch');
+          result.reports.push(r);}
+      }
+    }
+    if(q.operation==='status'&&result.runtime){const r=result.runtime;
+      result.runtime={runId:r.runId,closed:r.closed,terminal:r.terminal,reason:r.reason,samples:r.samples,
+        sessions:r.sessions,originMs:r.originMs,invocations:r.invocations,attemptsReserved:r.attemptsReserved};}
+  }
+  return {requestId:q.requestId,operation:q.operation,...result};
+}
+module.exports={PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control};
+
+};
+__factories["src/autonomous/job-probe"]=function(module,exports,require){
+// Store probe v2 candidate: twelve rounds inside two bounded configured sessions.
+'use strict';
+function start(job,role,o){
+  if(!['a','b'].includes(role))throw Error('invalid_probe_role');
+  const run=job.task.runId,anchor=job.probeAtMs,end=anchor+112000;
+  let ended=false,round=0,last=o.now();
+  function done(reason){if(!ended){ended=true;o.done(reason);}}
+  function guard(fn){if(ended)return;try{
+    const now=o.now();if(now<last||now>end){done('probe_clock_or_window');return;}last=now;
+    if(o.cancelled()){done('operator_stop');return;}fn();
+  }catch(_){done('probe_store_error');}}
+  function schedule(fn,ms){o.schedule(()=>guard(fn),Math.max(1,ms));}
+  function begin(){
+    if(round===12){done('probe_complete');return;}
+    const at=anchor+round*10000;
+    if(o.now()<at){schedule(begin,at-o.now());return;}
+    if(o.now()-at>1500){done('probe_missed_round');return;}
+    const prefix='vidhub-own-probe-'+run+'-r'+round,key=prefix+'-'+role;
+    if(o.read(key)!==null){done('probe_duplicate_role');return;}
+    const startMs=o.now(),ops=[],id=role+'-'+o.sessionId;let step=0,winner=false;
+    function finish(){
+      const report={version:1,runId:run,round,role,sessionId:o.sessionId,startMs,endMs:o.now(),winner,ops};
+      if(o.write(JSON.stringify(report),key)!==true)throw Error('report_write_failed');
+      round++;schedule(begin,1);
+    }
+    function next(){
+      if(o.now()-startMs>2000){done('probe_round_timeout');return;}
+      let value;
+      if(step===0&&o.write(id,prefix+'-race')!==true)throw Error('store_write_failed');
+      if(step===1){value=o.read(prefix+'-door');if(value!==null){ops.push([o.now(),step,value]);finish();return;}}
+      if(step===2&&o.write('closed',prefix+'-door')!==true)throw Error('store_write_failed');
+      if(step===3){value=o.read(prefix+'-race');winner=value===id;}
+      ops.push([o.now(),step,value===undefined?null:value]);step++;
+      if(step===4){finish();return;}
+      schedule(next,10+((round+(role==='a'?step:3-step))%3)*10);
+    }
+    next();
+  }
+  guard(begin);
+}
+module.exports={start};
+
+};
+__factories["src/autonomous/job-service"]=function(module,exports,require){
+// Job service v2 candidate: configured timers execute tasks; control only writes parameters.
+'use strict';
+const jobs=require('./jobs'),runtime=require('./runtime'),probe=require('./job-probe'),owner=require('./ownership');
+function dispatch(service,role,o){
+  const s=jobs.validateService(service),began=o.now();let ended=false;
+  const done=result=>{if(!ended){ended=true;o.done(result);}};
+  const c=jobs.context(s,o);
+  function attempt(){
+    if(ended)return;
+    let admitted;
+    try{admitted=jobs.admit(s,o,role);}catch(e){
+      if(['job_control_busy','parent_changed_during_claim','job_changed'].includes(e.message)&&o.now()-began<1200){
+        o.schedule(attempt,50);return;}
+      done({reason:e.message});return;
+    }
+    const j=admitted.job;if(!j){done({reason:admitted.reason,quiet:true});return;}
+    if(j.task.kind==='observe'){
+      if(role!=='worker'){done({reason:'idle',quiet:true});return;}
+      o.setBinding(j.binding);
+      try{runtime.start({binding:j.binding,codeId:o.codeId,sessionId:o.sessionId,capabilities:{actionsQualified:false},
+        now:o.now,schedule:o.schedule,readStore:o.read,writeStore:o.write,api:o.api,done:result=>{
+          try{
+            const h=owner.head({read:o.read});
+            if(h.state?.runId===j.task.runId&&h.state.closed&&h.state.terminal){
+              jobs.complete(s,o,j.task.runId,h.state.reason);
+            }else if(result.reason==='stop_flag')jobs.complete(s,o,j.task.runId,'operator_stop');
+          }catch(_){/* Keep the runtime evidence; never infer closure from a failed ledger write. */}
+          done(result);
+        }});
+      }catch(e){done({reason:e.message});}
+      return;
+    }
+    const actor=role==='worker'?'a':'b',actorKey=c.key(j.task.runId,'actor-'+actor);
+    // One-shot admission per role protects against duplicate cron invocations.
+    if(o.read(actorKey)!==null){done({reason:'probe_role_already_started',quiet:true});return;}
+    const roleStore={read:k=>o.read(c.key(j.task.runId+'-'+actor,k.slice(owner.PREFIX.length+1))),
+      write:(k,v)=>o.write(v,c.key(j.task.runId+'-'+actor,k.slice(owner.PREFIX.length+1)))};
+    try{
+      if(!owner.claim(roleStore,0,o.sessionId)){done({reason:'probe_role_busy'});return;}
+      c.put(actorKey,o.sessionId);
+      probe.start(j,actor,{...o,cancelled:()=>o.read(c.key(j.task.runId,'cancel'))!==null,done:reason=>{
+        try{
+          c.put(c.key(j.task.runId,'done-'+actor),reason);
+          const a=o.read(c.key(j.task.runId,'done-a')),b=o.read(c.key(j.task.runId,'done-b'));
+          if(a!==null&&b!==null)jobs.complete(s,o,j.task.runId,a==='probe_complete'&&b==='probe_complete'?
+            'probe_records_ready':'probe_incomplete');
+        }catch(_){/* Missing completion remains visible and blocks automatic replacement. */}
+        done({reason});
+      }});
+    }catch(e){done({reason:e.message});}
+  }
+  attempt();
+}
+module.exports={dispatch};
+
+};
 (function(){
   'use strict';
   let finished=false;
@@ -1149,6 +1480,24 @@ module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
   try{
     if(typeof $argument!=='string'||$argument.length>8192)throw Error('invalid_argument');
     const envelope=JSON.parse(decodeURIComponent($argument));
+    if(envelope&&Object.keys(envelope).sort().join()==='operation,service'&&envelope.operation==='service'){
+      const s=__require('src/autonomous/jobs').validateService(envelope.service);
+      if($environment.system!=='tvOS'||String($environment['surge-build'])!==s.expectedBuild||
+        $environment['device-model']!==s.expectedModel)throw Error('wrong_tv_environment');
+      const role=$script.name==='vidhub-job-worker'?'worker':$script.name==='vidhub-job-peer'?'peer':null;
+      if(!role||$script.type!=='cron'||typeof $trigger!=='undefined'||typeof $cronexp!=='string'||
+        $cronexp!=='0 */2 * * * *')throw Error('configured_timer_required');
+      // Core module defaults need the fixed target before the runtime is loaded.
+      __binding=s;
+      __require('src/autonomous/job-service').dispatch(s,role,{codeId:__codeId,sessionId:$script.sessionID,
+        now:()=>Date.now(),schedule:(fn,ms)=>setTimeout(fn,ms),read:k=>$persistentStore.read(k),
+        write:(v,k)=>$persistentStore.write(v,k),setBinding:b=>{__binding=b;},
+        api:(method,path,body,cb)=>{
+          if(method!=='GET'||path!=='/v1/requests/active'||body!==null)throw Error('api_not_allowed');
+          $httpAPI(method,path,body,cb);
+        },done:result=>{if(result.quiet){if(!finished){finished=true;$done();}}else done(result);}});
+      return;
+    }
     if(!envelope||Object.keys(envelope).sort().join()!=='binding,operation')throw Error('invalid_envelope');
     const b=envelope.binding;
     if(!b||b.enabled!==true){done({reason:'disabled'});return;}
@@ -1161,7 +1510,7 @@ module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
       if($script.type!=='cron'||$script.name!=='vidhub-autonomous-worker'||
         typeof $trigger!=='undefined'||typeof $cronexp!=='string'||$cronexp!=='0 */2 * * * *')
         throw Error('configured_timer_required');
-      __require('tv-autonomous/runtime').start({binding:b,codeId:__codeId,sessionId:$script.sessionID,
+      __require('src/autonomous/runtime').start({binding:b,codeId:__codeId,sessionId:$script.sessionID,
         capabilities:__capabilities,now:()=>Date.now(),schedule:(fn,ms)=>setTimeout(fn,ms),
         readStore:k=>$persistentStore.read(k),writeStore:(v,k)=>$persistentStore.write(v,k),
         api:(method,path,body,cb)=>{
@@ -1171,8 +1520,8 @@ module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
           if(!read&&!kill)throw Error('api_not_allowed');$httpAPI(method,path,body,cb);
         },done});
     }else{
-      __require('tv-autonomous/runtime').validate(b);
-      const owner=__require('tv-autonomous/ownership');
+      __require('src/autonomous/runtime').validate(b);
+      const owner=__require('src/autonomous/ownership');
       if($script.type!=='generic'||$script.name!=='vidhub-autonomous-'+op||!['read','stop','observe'].includes(op))
         throw Error('configured_control_required');
       const head=owner.head({read:k=>$persistentStore.read(k)});
