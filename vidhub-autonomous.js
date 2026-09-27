@@ -1,4 +1,4 @@
-// Version e8f26578d62f5739c10b8036b7c5657b28c46cb7c74097da6b5636817cf98d3e; phase: read-only job-service candidate, actions disabled.
+// Version 95dea66d6fcf524c12facef6adbf8ffd1bcb42fcf75f800811ea794c61afd363; phase: bounded-action job integration candidate, action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,8 +10,8 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="e8f26578d62f5739c10b8036b7c5657b28c46cb7c74097da6b5636817cf98d3e";
-const __capabilities=Object.freeze({"actionsQualified": false});
+const __codeId="95dea66d6fcf524c12facef6adbf8ffd1bcb42fcf75f800811ea794c61afd363";
+const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
 (function (root, factory) {
@@ -1145,7 +1145,7 @@ module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
 
 };
 __factories["src/autonomous/jobs"]=function(module,exports,require){
-// Job protocol v2 candidate: bounded read-only tasks, independent of deployment time.
+// Job protocol v2 extension: bounded execute tasks require an independently qualified build.
 'use strict';
 const owner=require('./ownership');
 const PERIOD=120000;
@@ -1165,20 +1165,25 @@ function validateService(s){
   return s;
 }
 function validateTask(t){
-  if(!exact(t,'runId,kind,delayMs,startGraceMs,waitTargetMs,durationMs')||!id(t.runId)||
-    !['observe','probe'].includes(t.kind)||!['delayMs','startGraceMs','waitTargetMs','durationMs'].every(k=>integer(t[k]))||
+  const active=t?.kind==='execute';
+  const keys='runId,kind,delayMs,startGraceMs,waitTargetMs,durationMs'+(active?',maxAttempts,referenceMs,tailMs':'');
+  if(!exact(t,keys)||!id(t.runId)||
+    !['observe','probe','execute'].includes(t.kind)||!['delayMs','startGraceMs','waitTargetMs','durationMs'].every(k=>integer(t[k]))||
     t.delayMs>86400000||t.startGraceMs<PERIOD||t.startGraceMs>1800000||
-    (t.kind==='observe'&&(t.durationMs<5000||t.durationMs>900000||t.waitTargetMs<1000||t.waitTargetMs>300000||
+    (t.kind!=='probe'&&(t.durationMs<5000||t.durationMs>900000||t.waitTargetMs<1000||t.waitTargetMs>300000||
       t.waitTargetMs+t.durationMs>1200000))||
     (t.kind==='probe'&&(t.waitTargetMs!==0||t.durationMs!==PERIOD)))throw Error('invalid_task');
+  if(active&&(!['maxAttempts','referenceMs','tailMs'].every(k=>integer(t[k]))||
+    t.maxAttempts<1||t.maxAttempts>30||t.referenceMs<60000||t.tailMs<60000||
+    t.referenceMs+t.tailMs>=t.durationMs))throw Error('invalid_action_limits');
   return t;
 }
 function bindingFor(s,t,now){
   const end=now+t.waitTargetMs+t.durationMs;
-  return {enabled:true,runId:t.runId,mode:'observe',host:s.host,deviceName:s.deviceName,
+  return {enabled:true,runId:t.runId,mode:t.kind==='execute'?'execute':'observe',host:s.host,deviceName:s.deviceName,
     expectedBuild:s.expectedBuild,expectedModel:s.expectedModel,notBeforeMs:now,
     latestStartMs:Math.min(now+PERIOD,end-1),expiresMs:end,durationMs:t.durationMs,
-    waitTargetMs:t.waitTargetMs,referenceMs:0,tailMs:0,maxAttempts:0,diagnostic:null};
+    waitTargetMs:t.waitTargetMs,referenceMs:t.referenceMs??0,tailMs:t.tailMs??0,maxAttempts:t.maxAttempts??0,diagnostic:null};
 }
 function validateLedger(state,s){
   if(!Array.isArray(state.history)||state.history.length>16)throw Error('invalid_job_ledger');
@@ -1189,12 +1194,12 @@ function validateLedger(state,s){
       ![j.receivedMs,j.notBeforeMs,j.startByMs].every(integer)||j.notBeforeMs!==j.receivedMs+j.task.delayMs||
       j.startByMs!==j.notBeforeMs+j.task.startGraceMs)throw Error('invalid_job_ledger');
     ids.add(j.task.runId);
-    if(j.binding!==null&&(!integer(j.startedMs)||j.task.kind!=='observe'||
+    if(j.binding!==null&&(!integer(j.startedMs)||j.task.kind==='probe'||
       canonical(j.binding)!==canonical(bindingFor(s,j.task,j.startedMs))))throw Error('invalid_saved_binding');
     if(['pending','expired'].includes(j.phase)&&(j.binding!==null||j.probeAtMs!==null))throw Error('invalid_pending_job');
     if(['running','stopping','finished'].includes(j.phase)&&
       (!integer(j.startedMs)||j.startedMs<j.notBeforeMs||j.startedMs>j.startByMs||
-       (j.task.kind==='observe'&&j.binding===null)||
+       (j.task.kind!=='probe'&&j.binding===null)||
        (j.task.kind==='probe'&&j.probeAtMs!==Math.floor(j.startedMs/PERIOD)*PERIOD+5000)))throw Error('invalid_started_job');
   }
 }
@@ -1247,7 +1252,7 @@ function status(s,o,runId=null){
   const result=copy(picked);
   if(result.phase==='pending'&&o.now()>result.startByMs)result.phase='expired';
   let runtime=null;
-  if(result.task.kind==='observe'&&result.binding){
+  if(result.task.kind!=='probe'&&result.binding){
     runtime=runtimeState(o,result);
     if(runtime?.terminal&&runtime.closed){result.phase='finished';result.reason=runtime.reason;
       result.resultKey=owner.key(runtime.generation,'state');}
@@ -1262,7 +1267,9 @@ function status(s,o,runId=null){
 const terminal=j=>['cancelled','expired','finished'].includes(j.phase);
 function archive(state,j){state.history.push(j);if(state.history.length>16)state.history.shift();}
 function submit(s,o,t,replaces=null){
-  validateTask(t);if(replaces!==null&&!id(replaces))throw Error('invalid_replacement');
+  validateTask(t);
+  if(t.kind==='execute'&&o.capabilities?.actionsQualified!==true)throw Error('active_build_not_qualified');
+  if(replaces!==null&&!id(replaces))throw Error('invalid_replacement');
   const c=context(s,o),prior=c.head().state,existing=[prior?.current,...(prior?.history||[])].find(j=>j?.task.runId===t.runId);
   const spec=canonical(t),saved=o.read(c.key(t.runId,'spec'));
   if(existing){
@@ -1313,8 +1320,9 @@ function admit(s,o,role){
   if(!current||terminal(current))return {reason:'idle'};
   const view=status(s,o),j=view.job,now=o.now();
   if(!j||terminal({...j,phase:view.status}))return {reason:'idle'};
+  if(j.task.kind!=='probe'&&role==='peer')return {reason:'idle'};
+  if(j.task.kind==='execute'&&o.capabilities?.actionsQualified!==true)return {reason:'active_build_not_qualified'};
   if(j.phase==='stopping')return {job:j,reason:'stopping'};
-  if(j.task.kind==='observe'&&role==='peer')return {reason:'idle'};
   if(now<j.notBeforeMs)return {reason:'waiting'};
   if(j.phase!=='pending')return {job:j};
   if(j.task.kind==='probe'&&now%PERIOD>1500)return {reason:'probe_waiting_boundary'};
@@ -1322,7 +1330,7 @@ function admit(s,o,role){
     if(state.current?.task.runId!==j.task.runId||state.current.phase!=='pending')throw Error('job_changed');
     if(o.read(c.key(j.task.runId,'cancel'))!==null)throw Error('job_cancelled');
     const x=state.current;x.phase='running';x.startedMs=now;
-    if(x.task.kind==='observe'){
+    if(x.task.kind!=='probe'){
       x.binding=bindingFor(s,x.task,now);
     }else x.probeAtMs=Math.floor(now/PERIOD)*PERIOD+5000;
     return state;
@@ -1333,7 +1341,7 @@ function complete(s,o,runId,reason){
   const c=context(s,o);
   return c.transaction(state=>{
     if(state.current?.task.runId!==runId)throw Error('job_changed');
-    if(state.current.task.kind==='observe'){
+    if(state.current.task.kind!=='probe'){
       const h=owner.head({read:o.read});
       if(h.state?.runId===runId){
         if(!h.state.closed||!h.state.terminal)throw Error('worker_not_closed');
@@ -1417,7 +1425,7 @@ module.exports={start};
 
 };
 __factories["src/autonomous/job-service"]=function(module,exports,require){
-// Job service v2 candidate: configured timers execute tasks; control only writes parameters.
+// Job service v2 extension: configured timers own sampling and bounded actions; control is store-only.
 'use strict';
 const jobs=require('./jobs'),runtime=require('./runtime'),probe=require('./job-probe'),owner=require('./ownership');
 function dispatch(service,role,o){
@@ -1433,10 +1441,10 @@ function dispatch(service,role,o){
       done({reason:e.message});return;
     }
     const j=admitted.job;if(!j){done({reason:admitted.reason,quiet:true});return;}
-    if(j.task.kind==='observe'){
+    if(j.task.kind!=='probe'){
       if(role!=='worker'){done({reason:'idle',quiet:true});return;}
       o.setBinding(j.binding);
-      try{runtime.start({binding:j.binding,codeId:o.codeId,sessionId:o.sessionId,capabilities:{actionsQualified:false},
+      try{runtime.start({binding:j.binding,codeId:o.codeId,sessionId:o.sessionId,capabilities:o.capabilities??{actionsQualified:false},
         now:o.now,schedule:o.schedule,readStore:o.read,writeStore:o.write,api:o.api,done:result=>{
           try{
             const h=owner.head({read:o.read});
@@ -1489,11 +1497,14 @@ module.exports={dispatch};
         $cronexp!=='0 */2 * * * *')throw Error('configured_timer_required');
       // Core module defaults need the fixed target before the runtime is loaded.
       __binding=s;
-      __require('src/autonomous/job-service').dispatch(s,role,{codeId:__codeId,sessionId:$script.sessionID,
+      __require('src/autonomous/job-service').dispatch(s,role,{codeId:__codeId,sessionId:$script.sessionID,capabilities:__capabilities,
         now:()=>Date.now(),schedule:(fn,ms)=>setTimeout(fn,ms),read:k=>$persistentStore.read(k),
         write:(v,k)=>$persistentStore.write(v,k),setBinding:b=>{__binding=b;},
         api:(method,path,body,cb)=>{
-          if(method!=='GET'||path!=='/v1/requests/active'||body!==null)throw Error('api_not_allowed');
+          const read=method==='GET'&&path==='/v1/requests/active'&&body===null;
+          const kill=__capabilities.actionsQualified===true&&__binding.mode==='execute'&&method==='POST'&&
+            path==='/v1/requests/kill'&&body&&Object.keys(body).join()==='id'&&Number.isSafeInteger(body.id)&&body.id>=0;
+          if(!read&&!kill)throw Error('api_not_allowed');
           $httpAPI(method,path,body,cb);
         },done:result=>{if(result.quiet){if(!finished){finished=true;$done();}}else done(result);}});
       return;

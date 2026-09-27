@@ -1,65 +1,61 @@
-# Read-only TV job service v2
+# Finite TV reconnect trial service
 
-Publishing these files does not deploy a configuration or start a task.
-The compiled `actionsQualified` gate remains false. The v2 task protocol accepts
-only observation and store-probe tasks; it cannot enable connection termination.
+This build enables bounded connection-control capability for explicitly submitted
+`execute` tasks. Publication alone does not deploy a configuration, schedule a
+trial, or terminate any connection. A fresh private service installation is idle
+until a separately authorized task is received.
 
-## Stable deployment, separate tasks
+## Execution and limits
 
-Deploy a private service binding once, using a fixed commit URL. Two configured
-JSC cron entries run every two minutes: a worker and a probe peer, each with a
-120-second timeout. The binding contains the installation identity, target and
-TV environment constraints, but no trial ID or trial dates.
+Two configured JSC entries run every two minutes. The worker owns sampling,
+decisions, fresh revalidation, single-connection termination and local records.
+The peer only participates in a separate storage probe. A one-shot computer
+helper transfers parameters and reads status/results; it has no traffic API or
+sampling loop. It does not drive the TV worker.
 
-A local, one-shot maintenance helper submits task parameters to the TV store.
-It performs no traffic reads, network requests or sampling loop. The TV's own
-configured timer admits and executes the task. Submission acknowledgment,
-actual startup and terminal completion are separate states.
+Each execute task has a unique ID, a bounded first-start window, a finite target
+wait, at most fifteen minutes from productive traffic, and an explicit cumulative
+allowance of 1 to 30 attempts. The first and last minute (or longer, if specified)
+are observation only. An absolute deadline also bounds waiting plus runtime.
+Normal two-minute handoffs retain state and consumed allowances. Quota exhaustion
+leaves observation running until the finite task ends. Idle or finished tasks
+cannot restart themselves or replenish their allowance.
 
-Tasks have unique IDs, a delay relative to TV receipt, a bounded first-start
-grace period, a target-wait budget and a sampling duration. Sampling lasts at
-most fifteen minutes after productive target traffic is observed; an absolute
-deadline also bounds waiting and execution. Identical resubmission returns the
-original task without extending its clock. Pending or unstarted expired tasks
-can be replaced with a new ID. Running tasks must stop and close first.
+The existing decision rules remain unchanged: a 2,000,000 B/s threshold,
+four-second natural download-startup protection, and fixed five-second protection
+from our own disconnect dispatch. Zero/near-zero traffic is not terminated.
+Actions require a unique, recently productive, eligible main connection and fresh
+identity/rate evidence. Target and device constraints are supplied privately at
+installation and cannot be overridden by a task. The service action endpoint
+accepts only one numeric connection ID.
 
-## Probe and observation
+## Stop, failure and evidence
 
-The store probe is a separate task requiring no playback. Two finite configured
-sessions perform twelve rounds with independent keys and export up to twenty-four
-reports. Missing or late actors leave incomplete evidence; old rounds are never
-filled retrospectively. Finite probe success does not prove every possible store
-execution and never unlocks actions.
+A stop flag is monotonic and is checked before action dispatch. Stop receipt and
+verified worker closure are separate states. An unknown termination reply,
+incomplete ownership state or inconsistent storage blocks automatic retries.
+The computer control tool treats an empty or uncorrelated response as unknown;
+it does not infer that a write succeeded or never happened.
 
-Observation retains the existing download decision pipeline and startup/retry
-protection. It samples target connections nominally every 100 ms, or every second
-when no target exists. State and budgets survive normal two-minute handoffs.
-Unexpected ownership or incomplete runtime state blocks automatic takeover.
+Records distinguish low-speed candidates, blocked decisions, reserved attempts,
+API invocations/replies, old-connection disappearance and successor growth.
+Bounded pre/post samples remain in the local TV store. An API reply is not proof
+of faster playback. Cross-session coordination assumes atomic, coherent individual
+store reads and writes; a finite passing probe does not establish that assumption
+for all possible executions. Long-term retention, CPU and power costs remain
+unmeasured. This is a finite acceptance build, not an unattended permanent service.
 
-When idle, delayed or finished, the service exits without traffic reads or idle
-logs. The two cron declarations still represent a nominal sixty short invocations
-per hour. CPU and power cost remain unmeasured. Removing all periodic invocations
-requires removing the declarations from the configuration.
+## Distribution and validation
 
-## Distribution and remaining acceptance
+This release updates exactly `vidhub-autonomous.js`, `README.md`, and `SHA256SUMS`.
+Other existing distribution files and earlier immutable commits remain available.
+No private configuration, device binding, target domain, credentials, sample trace
+or local source manifest is a publication input. No external telemetry destination
+is included. Deploy using an immutable commit URL and a new installation identity;
+first verify the previous task is closed. Deployment does not authorize a trial.
 
-This update changes only `vidhub-autonomous.js`, this README and `SHA256SUMS`.
-The previous standalone `vidhub-ownership-probe.js` is retained unchanged for
-older fixed-version configurations; v2 runs its probe inside the main bundle.
-Other pre-existing distribution files are retained.
-
-No private configurations, bindings, device identifiers, target domain,
-credentials, sample traces or local source manifests are publication inputs.
-There is no external telemetry destination. Records remain in the TV store;
-long-term retention and cleanup require separate review.
-
-Local checks cover built-script execution, store-only control, concurrency,
-idempotency, rescheduling, cancellation, bounded runtime, multi-session handoff,
-probe completeness, native profile syntax and historical rule parity. They do
-not substitute for TV acceptance of this version or measurements of its overhead.
-Cross-session coordination still assumes coherent atomic individual store reads
-and writes. The action release gate remains closed pending further acceptance.
-
-References: [Surge scripting](https://manual.nssurge.com/scripting/overview.html),
-[persistent storage](https://manual.nssurge.com/scripting/api.html),
-[configured cron](https://manual.nssurge.com/scripting/cron.html).
+The local checks cover the actual compiled entry, bounded actions, cumulative
+quotas across eight sessions, observation bookends, cancellation, lost replies,
+store-only helpers, and unchanged historical decision output. Simulated calls do
+not establish real TV termination behavior, benefit, or power consumption. The
+`actionsQualified` field is a build capability gate, not a claim of those results.
