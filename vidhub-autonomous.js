@@ -1,4 +1,4 @@
-// Version 95dea66d6fcf524c12facef6adbf8ffd1bcb42fcf75f800811ea794c61afd363; phase: bounded-action job integration candidate, action-trial build; runtime acceptance pending.
+// Version ffde49017a1b44d1d2a8370e702c9cc55488ad8b6b4ae710404bed3cd25c8fb0; phase: long-v1 recovery and bounded evidence candidate, action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="95dea66d6fcf524c12facef6adbf8ffd1bcb42fcf75f800811ea794c61afd363";
+const __codeId="ffde49017a1b44d1d2a8370e702c9cc55488ad8b6b4ae710404bed3cd25c8fb0";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -636,6 +636,89 @@ class DownloadStartup {
 module.exports={DownloadStartup,DEFAULTS};
 
 };
+__factories["src/policy/recovery-review-policy"]=function(module,exports,require){
+'use strict';
+// Candidate policy only, enabled by the explicit long-v1 task profile.
+// A stagnant successor is a separate decision; ordinary WAIT stays protected.
+const DEFAULTS=Object.freeze({observation_s:5,stall_s:3,tracking_s:30,max_rescues:1,
+  progress_s:1,progress_bytes:65536,near_zero_Bps:40960,dip_s:1.5,fast_memory_s:10});
+const fp=r=>`${r.id}/${r.started}/${r.engine}`;
+const fresh=()=>({actionAt:null,old:null,known:[],successor:null,previous:null,quietAt:null,
+  progressSeconds:0,progressBytes:0,started:false,resumed:false,disarmed:null,rescues:0,fast:null,
+  hadTarget:false,emptyAt:null,emptyLast:null,entryAt:null});
+class RecoveryReview {
+  constructor(){this.s=fresh();}
+  afterAction(action,t){
+    const rescue=action.decision?.reason==='stalled_own_successor';
+    const used=this.s.resumed?0:this.s.rescues;
+    this.s={...fresh(),actionAt:t,old:fp(action.connection),known:action.pre_action_targets.map(fp),
+      rescues:rescue?used+1:used,hadTarget:true};
+    if(action.pre_action_targets.length!==1)this.s.disarmed='successor_lost_or_ambiguous';
+  }
+  ingest(f){
+    const s=this.s,p=f.point,t=f.time_s;
+    // Absence polling is 1 Hz, outside the speed detector's 0.5 s limit.
+    // Observe absence explicitly so a later viewing session still gets its
+    // existing four seconds from first appearance. Continuous ID churn does not.
+    if(f.read_ms<=250&&f.targets.length===0){
+      if(s.emptyLast===null||t-s.emptyLast>1.5)s.emptyAt=t;
+      s.emptyLast=t;
+    }else if(f.targets.length){
+      const ownPending=s.actionAt!==null&&!s.started&&!s.disarmed&&t-s.actionAt<=DEFAULTS.tracking_s;
+      if(!ownPending&&(!s.hadTarget||(s.emptyAt!==null&&s.emptyLast-s.emptyAt>=.6)))s.entryAt=t;
+      s.hadTarget=true;s.emptyAt=null;s.emptyLast=null;
+    }else {s.emptyAt=null;s.emptyLast=null;}
+    if(s.actionAt!==null&&p.reliable_read&&p.state==='DOWNLOAD'&&!p.protected&&f.unique_main&&p.main_delta_bytes>0)
+      s.started=true;
+    if(p.reliable_read&&p.state==='DOWNLOAD'&&f.unique_main&&p.phase_rate_Bps>=2000000){
+      const r=f.targets.find(x=>x.id===p.main_id);if(r)s.fast={id:fp(r),at:t};
+    }else if(p.state==='WAIT')s.fast=null;
+    if(s.actionAt===null||s.resumed||s.disarmed)return;
+    if(t-s.actionAt>DEFAULTS.tracking_s){s.disarmed='recovery_tracking_expired';return;}
+    // Multiple possible successors or disappearance cannot establish lineage.
+    if(f.targets.length!==1||s.known.includes(fp(f.targets[0]))){
+      if(s.successor!==null)s.disarmed='successor_lost_or_ambiguous';
+      s.previous=null;s.quietAt=null;return;
+    }
+    const r=f.targets[0],id=fp(r);
+    if(s.successor===null&&r.inBytes>=DEFAULTS.progress_bytes)s.started=true;
+    if(s.successor!==null&&s.successor!==id){s.disarmed='successor_changed';return;}
+    s.successor=id;
+    const prior=s.previous,dt=prior?t-prior.t:null,delta=prior?r.inBytes-prior.bytes:null;
+    const reliable=p.reliable_read===true&&f.read_ms<=250&&prior&&prior.readMs<=250&&dt>0&&dt<=.5&&delta>=0;
+    s.previous={t,bytes:r.inBytes,readMs:f.read_ms};
+    if(!reliable){s.quietAt=null;return;}
+    if(delta/dt>=DEFAULTS.near_zero_Bps){
+      s.progressSeconds+=dt;s.progressBytes+=delta;s.quietAt=null;
+      if(s.progressSeconds+1e-9>=DEFAULTS.progress_s&&s.progressBytes>=DEFAULTS.progress_bytes){
+        s.resumed=true;s.rescues=0;
+      }
+    }else if(s.quietAt===null)s.quietAt=prior.t;
+  }
+  consider(f){
+    const s=this.s,t=f.time_s;
+    if(s.actionAt===null||s.started||s.resumed||s.disarmed)return null;
+    if(t-s.actionAt<DEFAULTS.observation_s||!f.rearm.window_complete)return null;
+    if(s.rescues>=DEFAULTS.max_rescues)return {row:null,reason:'recovery_rescue_budget_exhausted'};
+    if(!f.point.reliable_read||f.read_ms>250||s.quietAt===null||t-s.quietAt<DEFAULTS.stall_s||
+      f.targets.length!==1||fp(f.targets[0])!==s.successor)return null;
+    // A normal productive candidate uses the ordinary measurement path.
+    if(f.point.state==='DOWNLOAD'&&!f.point.protected)return null;
+    return {row:f.targets[0],reason:'stalled_own_successor'};
+  }
+  filter(f,d){
+    const fast=this.s.fast,p=f.point;
+    if(d.row&&this.s.entryAt!==null&&f.time_s-this.s.entryAt<4)
+      return {row:null,reason:'natural_download_startup'};
+    if(d.row&&fast&&fast.id===fp(d.row)&&f.time_s-fast.at<=DEFAULTS.fast_memory_s&&
+      p.low_since_s!==null&&p.elapsed_s-p.low_since_s<DEFAULTS.dip_s)
+      return {row:null,reason:'recent_fast_dip_confirmation'};
+    return d;
+  }
+}
+module.exports={RecoveryReview,DEFAULTS};
+
+};
 __factories["src/pipeline"]=function(module,exports,require){
 'use strict';
 // Pure TV decision pipeline. The executed historical modules remain unchanged.
@@ -643,6 +726,7 @@ const {Detector}=require('./core/detector');
 const {create}=require('./core/adapter');
 const {RetryRearm}=require('./policy/retry-rearm-policy');
 const {DownloadStartup}=require('./policy/download-startup-policy');
+const {RecoveryReview}=require('./policy/recovery-review-policy');
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const POLICY=Object.freeze({startup_s:4,near_zero_Bps:40960,quiet_window_s:.4,quiet_confirm_s:.6});
@@ -710,7 +794,9 @@ class Replacement{
   allows(row){const fp=fingerprint(row);return this.absent>=2&&!this.known.has(fp)&&this.growing.has(fp);}
 }
 class Pipeline{
-  constructor(){
+  constructor(profile=null){
+    if(profile!==null&&profile!=='long-v1')throw Error('invalid_pipeline_profile');
+    this.review=profile==='long-v1'?new RecoveryReview():null;
     const fields=Object.fromEntries(['id','inBytes','local','deviceName','completed','failed'].map(k=>[k,[k]]));
     fields.url=['URL'];this.adapt=create({verified:true,rowsPath:['requests'],fields});
     this.detector=new Detector();this.detector.protect();this.gate=new MeasurementGate();
@@ -726,7 +812,7 @@ class Pipeline{
       const fp=fingerprint(row);
       if(expectedEngine!==undefined&&row.engine!==expectedEngine)throw Error('engine_changed');
       if(this.seen.has(row.id)&&this.seen.get(row.id)!==fp)throw Error('reused_connection_identity');
-      this.seen.set(row.id,fp);if(this.seen.size>256)throw Error('identity_history_capacity');
+      this.seen.set(row.id,fp);if(this.seen.size>(this.review?1024:256))throw Error('identity_history_capacity');
       return row;
     });
     const time_s=(beginMs+endMs)/2000,read_ms=endMs-beginMs;
@@ -736,26 +822,38 @@ class Pipeline{
     if(point.needs_baseline)throw Error('invalid_core_sample');
     const frame={time_s,read_ms,received_ms:endMs,point,targets,unique_main:uniqueMain(this.detector,point)};
     frame.rearm=this.own.ingest(frame);frame.startup=this.startup.ingest(frame);
-    if(this.replacement)this.replacement.observe(frame);
+    if(this.replacement){
+      this.replacement.observe(frame);
+      if(this.review){const present=new Set(targets.map(fingerprint));
+        this.replacement.growing=new Set([...this.replacement.growing].filter(k=>present.has(k)));}
+    }
+    if(this.review)this.review.ingest(frame);
     return frame;
   }
   consider(frame){
+    const rescue=this.review?.consider(frame);
+    if(rescue?.row)return rescue;
     const decision=this.gate.consider(frame);
-    if(!decision.row)return decision;
+    if(!decision.row)return rescue||decision;
     if(!frame.rearm.retry_allowed)return {row:null,reason:frame.rearm.reason};
     if(!frame.startup.startup_permits_retry)return {row:null,reason:frame.startup.reason};
     if(this.replacement&&!this.replacement.allows(decision.row))return {row:null,reason:'replacement_not_confirmed'};
-    return decision;
+    return this.review?this.review.filter(frame,decision):decision;
   }
   revalidate(first,last,nowMs){
     const d=this.consider(last);if(!d.row)return d;
-    if(fingerprint(first.row)!==fingerprint(d.row)||d.row.inBytes<=first.row.inBytes)
+    const rescue=d.reason==='stalled_own_successor';
+    const dt=(last.received_ms-first.receivedMs)/1000,delta=d.row.inBytes-first.row.inBytes;
+    const stillNearZero=dt>0&&dt<=.5&&delta>=0&&delta/dt<=POLICY.near_zero_Bps;
+    if((rescue&&first.reason!==d.reason)||fingerprint(first.row)!==fingerprint(d.row)||
+      (rescue?!stillNearZero:d.row.inBytes<=first.row.inBytes))
       return {row:null,reason:'identity_changed_or_no_new_growth'};
     if(!finite(nowMs)||nowMs-last.received_ms<0||nowMs-last.received_ms>250)
       return {row:null,reason:'stale_before_dispatch'};
     return d;
   }
   afterAction(action,timeMs){
+    if(this.review)this.review.afterAction(action,timeMs/1000);
     this.detector.discardEvidence();this.detector.protect();this.gate.reset();
     this.own.afterAction(timeMs/1000);this.startup.afterAction(timeMs/1000);
     this.replacement=new Replacement(action);
@@ -857,7 +955,7 @@ function inspectJSON(x,depth=0){
   if(typeof x==='number'){if(!finite(x))throw Error('snapshot_number');return;}
   if(typeof x==='string'){if(x.length>65536)throw Error('snapshot_string');return;}
   if(!x||typeof x!=='object')throw Error('snapshot_value');
-  if(Object.keys(x).length>512)throw Error('snapshot_capacity');
+  if(Object.keys(x).length>1024)throw Error('snapshot_capacity');
   for(const k of Object.keys(x)){
     if(['__proto__','constructor','prototype'].includes(k))throw Error('snapshot_key');
     inspectJSON(x[k],depth+1);
@@ -865,7 +963,7 @@ function inspectJSON(x,depth=0){
 }
 function capture(p){
   const s=p.startup;
-  return copy({version:1,core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
+  return copy({version:1,...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
     startup:{clock:s.clock,previous:s.previous?{...s.previous,rows:[...s.previous.rows]}:null,
       history:s.history,tracks:[...s.tracks],quietSince:s.quietSince,waiting:s.waiting,waitOrigin:s.waitOrigin,
       start:s.start,end:s.end,source:s.source,episode:s.episode,awaitOwnSuccessor:s.awaitOwnSuccessor},
@@ -875,9 +973,22 @@ function capture(p){
 }
 function restore(x){
   if(JSON.stringify(x).length>196608)throw Error('snapshot_capacity');inspectJSON(x);
-  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime']);
+  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[])]);
   if(x.version!==1||!(x.lastTime===null||finite(x.lastTime)))throw Error('snapshot_version');
-  const p=new Pipeline();if(!p.detector.restore(x.core))throw Error('snapshot_core');
+  const p=new Pipeline('review' in x?'long-v1':null);if(!p.detector.restore(x.core))throw Error('snapshot_core');
+  if(p.review){
+    const r=x.review;exact(r,Object.keys(p.review.s));
+    if(!times(r,['actionAt','quietAt','emptyAt','emptyLast','entryAt'])||typeof r.hadTarget!=='boolean'||!integer(r.rescues)||r.rescues>1||
+      !finite(r.progressSeconds)||r.progressSeconds<0||!integer(r.progressBytes)||
+      typeof r.started!=='boolean'||typeof r.resumed!=='boolean'||
+      ![null,'recovery_tracking_expired','successor_lost_or_ambiguous','successor_changed'].includes(r.disarmed)||
+      !Array.isArray(r.known)||r.known.length>8||r.known.some(v=>typeof v!=='string')||
+      ![r.old,r.successor].every(v=>v===null||typeof v==='string'))throw Error('snapshot_review');
+    if(r.previous){exact(r.previous,['t','bytes','readMs']);if(!finite(r.previous.t)||!integer(r.previous.bytes)||
+      !finite(r.previous.readMs)||r.previous.readMs<0)throw Error('snapshot_review');}
+    if(r.fast){exact(r.fast,['id','at']);if(typeof r.fast.id!=='string'||!finite(r.fast.at))throw Error('snapshot_review');}
+    p.review.s=copy(r);
+  }
   exact(x.own,['actionAt','lastClock']);if(!times(x.own,['actionAt','lastClock'])||
     (x.own.actionAt!==null&&(x.own.lastClock===null||x.own.actionAt>x.own.lastClock)))throw Error('snapshot_own');
   Object.assign(p.own,x.own);
@@ -905,7 +1016,7 @@ function restore(x){
   if(!(x.gate.episode===null||typeof x.gate.episode==='string')||typeof x.gate.recoveryUsed!=='boolean'||
     !(x.gate.holdUntil===null||finite(x.gate.holdUntil)))throw Error('snapshot_gate');
   Object.assign(p.gate,x.gate);
-  const seen=pairs(x.seen,256);
+  const seen=pairs(x.seen,p.review?1024:256);
   if(seen.some(([id,fp])=>!integer(id)||typeof fp!=='string'))throw Error('snapshot_seen');
   p.seen=new Map(seen);p.lastTime=x.lastTime;
   if(x.replacement){const r=x.replacement;exact(r,['old','known','growing','absent','previous']);
@@ -921,6 +1032,73 @@ function restore(x){
 module.exports={capture,restore,inspectJSON};
 
 };
+__factories["src/autonomous/long-evidence"]=function(module,exports,require){
+'use strict';
+const owner=require('./ownership');
+const {byteLength}=require('../core/runner');
+const fresh=()=>({version:1,timeline:[],decisions:[],decisionsDropped:0,lastDecisionKey:null,
+  lastObservedBytes:0,retiredGenerations:0,generations:[],maxSavedBytes:0});
+function observe(s,f,d,compact){
+  const e=s.longEvidence,t=f.received_ms,index=Math.floor((t-s.runStartedMs)/300000);
+  let bin=e.timeline.at(-1);
+  if(!bin||bin.index!==index){
+    if(e.timeline.length>=291)throw Error('timeline_capacity');
+    bin={index,startMs:t,endMs:t,samples:0,bytes:0,download:0,waiting:0,uncertain:0,
+      eligible:0,maxRate:0,rateSum:0,rateSamples:0,maxReadMs:0};e.timeline.push(bin);
+  }
+  bin.endMs=t;bin.samples++;bin.bytes+=Math.max(0,f.point.observed_received_bytes-e.lastObservedBytes);
+  e.lastObservedBytes=f.point.observed_received_bytes;
+  bin[f.point.state==='DOWNLOAD'?'download':f.point.state==='UNCERTAIN'?'uncertain':'waiting']++;
+  if(d.row)bin.eligible++;
+  if(Number.isFinite(f.point.phase_rate_Bps)){
+    bin.maxRate=Math.max(bin.maxRate,f.point.phase_rate_Bps);bin.rateSum+=f.point.phase_rate_Bps;bin.rateSamples++;
+  }
+  bin.maxReadMs=Math.max(bin.maxReadMs,f.read_ms);
+  // Bounded excerpts include protected candidates, not just dispatched actions.
+  const interesting=f.point.candidate||d.row||['recent_fast_dip_confirmation','recovery_rescue_budget_exhausted'].includes(d.reason);
+  const key=interesting?`${d.reason}/${f.point.main_id}/${f.point.low_since_s}`:null;
+  if(key&&key!==e.lastDecisionKey){
+    e.decisions.push({atMs:t,reason:d.reason,eligible:!!d.row,point:compact,
+      before:s.recent.filter((_,i)=>i%4===0).slice(-8)});
+    if(e.decisions.length>24){e.decisions.shift();e.decisionsDropped++;}
+  }
+  e.lastDecisionKey=key;
+}
+function boundAction(a){
+  // Keep decisions and the complete action ledger. Decimate only sample detail,
+  // explicitly count omitted points, and preserve excerpt endpoints.
+  while(byteLength(JSON.stringify(a))>8192){
+    const name=a.followup.length>=a.before.length?'followup':'before',rows=a[name];
+    if(rows.length<=2)throw Error('action_record_capacity');
+    const smaller=rows.filter((_,i)=>i===0||i===rows.length-1||i%2===0);
+    a.detailSamplesOmitted=(a.detailSamplesOmitted||0)+rows.length-smaller.length;a[name]=smaller;
+  }
+}
+function retire(s,store,owned,keep=2){
+  const e=s.longEvidence;
+  while(e.generations.length>keep){
+    const generation=e.generations[0];
+    if(store.read(owner.HEAD)!==owned||generation===s.generation)throw Error('retention_head_changed');
+    const key=owner.key(generation,'state'),old=owner.parse(store.read(key));
+    if(old.retired!==true&&(!old.closed||old.terminal||old.runId!==s.runId||old.codeId!==s.codeId))
+      throw Error('retention_state_mismatch');
+    const raw=JSON.stringify({version:1,retired:true,generation,runId:s.runId,
+      copiedInto:s.generation,reason:'normal_handoff_payload_compacted'});
+    if(store.write(key,raw)!==true||store.read(key)!==raw)throw Error('retention_write_failed');
+    // Splitter race/door registers, root, flags, and action accounting are never cleared.
+    e.generations.shift();e.retiredGenerations++;
+  }
+}
+function validate(e){
+  if(!e||e.version!==1||!Array.isArray(e.timeline)||e.timeline.length>291||
+    !Array.isArray(e.decisions)||e.decisions.length>24||!Array.isArray(e.generations)||e.generations.length>3||
+    e.generations.some(x=>!Number.isSafeInteger(x)||x<0)||
+    !['decisionsDropped','retiredGenerations','maxSavedBytes','lastObservedBytes'].every(k=>Number.isFinite(e[k])&&e[k]>=0))
+    throw Error('invalid_long_evidence');
+}
+module.exports={fresh,observe,boundAction,retire,validate};
+
+};
 __factories["src/autonomous/runtime"]=function(module,exports,require){
 'use strict';
 const {Pipeline,fingerprint}=require('../pipeline');
@@ -928,6 +1106,7 @@ const {endpoint}=require('../core/adapter');
 const {byteLength}=require('../core/runner');
 const ownership=require('./ownership');
 const snapshots=require('./snapshot');
+const evidence=require('./long-evidence');
 const PERIOD=120000,RESERVE=300,MAX_STATE=524288;
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
@@ -936,6 +1115,8 @@ function validate(b){
   const keys=['enabled','runId','mode','host','deviceName','expectedBuild','expectedModel','notBeforeMs',
     'latestStartMs','expiresMs','durationMs','referenceMs','tailMs','maxAttempts','diagnostic'];
   if(b&&Object.prototype.hasOwnProperty.call(b,'waitTargetMs'))keys.push('waitTargetMs');
+  const extended=b?.profile==='long-v1';
+  if(b&&Object.prototype.hasOwnProperty.call(b,'profile'))keys.push('profile');
   if(!b||Object.keys(b).sort().join()!==keys.sort().join()||b.enabled!==true||
     !/^[a-z0-9-]{16,80}$/.test(b.runId)||!['observe','execute','diagnostic'].includes(b.mode)||
     typeof b.host!=='string'||!b.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
@@ -944,10 +1125,12 @@ function validate(b){
     typeof b.expectedModel!=='string'||b.expectedModel.length>64||!b.expectedModel.length||
     !['notBeforeMs','latestStartMs','expiresMs','durationMs','referenceMs','tailMs','maxAttempts'].every(k=>integer(b[k]))||
     b.latestStartMs<=b.notBeforeMs||b.latestStartMs-b.notBeforeMs>300000||
-    b.expiresMs<=b.latestStartMs||b.expiresMs-b.notBeforeMs>1200000||
-    b.durationMs<5000||b.durationMs>900000||b.referenceMs+b.tailMs>=b.durationMs||
+    ('profile' in b&&!extended)||
+    b.expiresMs<=b.latestStartMs||b.expiresMs-b.notBeforeMs>(extended?86400000:1200000)||
+    b.durationMs<5000||b.durationMs>(extended?86400000:900000)||b.referenceMs+b.tailMs>=b.durationMs||
     b.maxAttempts>30||(b.mode==='observe'&&b.maxAttempts!==0)||(b.mode==='execute'&&b.maxAttempts<1)||
-    ('waitTargetMs' in b&&(!integer(b.waitTargetMs)||b.waitTargetMs<1000||b.waitTargetMs>300000)))
+    ('waitTargetMs' in b&&(!integer(b.waitTargetMs)||(extended?b.waitTargetMs!==0:b.waitTargetMs<1000||b.waitTargetMs>300000)))||
+    (extended&&(b.mode==='diagnostic'||b.expiresMs!==b.notBeforeMs+b.durationMs)))
     throw Error('invalid_configuration');
   if(b.mode==='diagnostic'){
     const d=b.diagnostic;
@@ -963,10 +1146,16 @@ function validateHandoff(s,b){
   if(s.version!==1||!['samples','candidates','eligible','attemptsReserved','invocations','sessions'].every(k=>integer(s[k]))||
     s.attemptsReserved>b.maxAttempts||s.invocations>s.attemptsReserved||!Array.isArray(s.actions)||
     s.actions.length!==s.attemptsReserved||!Array.isArray(s.recent)||s.recent.length>64||
-    !Array.isArray(s.events)||s.events.length>96||!Array.isArray(s.sessionHistory)||s.sessionHistory.length!==s.sessions||
+    !Array.isArray(s.events)||s.events.length>96||!Array.isArray(s.sessionHistory)||
+    s.sessionHistory.length+(s.sessionHistoryDropped||0)!==s.sessions||
     !integer(s.runStartedMs)||!integer(s.updatedMs)||s.updatedMs<s.runStartedMs||
     !(s.originMs===null||integer(s.originMs))||!(s.actionsDisabled===null||s.actionsDisabled==='operator_observe'))
     throw Error('invalid_handoff_ledger');
+  if(b.profile==='long-v1'){
+    evidence.validate(s.longEvidence);
+    if(!s.pipeline.review||!integer(s.sessionHistoryDropped)||s.sessionHistory.length>16)
+      throw Error('invalid_long_handoff');
+  }
   let last=null;
   for(let i=0;i<s.actions.length;i++){
     const a=s.actions[i];
@@ -977,6 +1166,13 @@ function validateHandoff(s,b){
   }
   if(s.invocations!==s.actions.length||s.pipeline?.own?.actionAt!==(last===null?null:last/1000))
     throw Error('handoff_action_clock_mismatch');
+  if(b.profile==='long-v1'){
+    const r=s.pipeline.review,a=s.actions.at(-1);
+    if(r.actionAt!==(last===null?null:last/1000)||
+      (a&&(r.old!==fingerprint(a.connection)||
+        (a.decision.reason==='stalled_own_successor'&&!r.resumed&&r.rescues!==1))))
+      throw Error('handoff_recovery_ledger_mismatch');
+  }
 }
 function start(o){
   const b=o.binding;let ended=false,owned=null,state=null,pipeline=null,pending=null,token=0,lastClock=null;
@@ -1000,10 +1196,10 @@ function start(o){
   if(!same&&store.read(flags.stop)!==null){done('stop_flag');return;}
   if(same&&parent.state.reason!=='normal_yield'){done('unsafe_handoff');return;}
   if(same){
-    if(parent.state.sessions>=16||begin<parent.state.updatedMs){done('handoff_limit_or_clock');return;}
+    if(parent.state.sessions>=(b.profile==='long-v1'?Math.ceil(b.durationMs/PERIOD)+2:16)||begin<parent.state.updatedMs){done('handoff_limit_or_clock');return;}
     validateHandoff(parent.state,b);
     pipeline=snapshots.restore(parent.state.pipeline);
-  }else pipeline=new Pipeline();
+  }else pipeline=new Pipeline(b.profile??null);
   const sessionStart=begin,sessionDeadline=Math.min(b.expiresMs,Math.floor(begin/PERIOD)*PERIOD+PERIOD-RESERVE);
   if(sessionDeadline-begin<1000){done('insufficient_session_budget');return;}
   const claim=ownership.begin(store,parent,b.runId,o.sessionId,o.codeId,h=>{
@@ -1014,12 +1210,14 @@ function start(o){
     const fresh={version:1,binding,runStartedMs:begin,originMs:null,sessions:0,sessionHistory:[],samples:0,
       candidates:0,eligible:0,attemptsReserved:0,invocations:0,actions:[],events:[],recent:[],gateReasons:{},
       states:{},maxReadMs:0,maxIntervalMs:0,lastSampleMs:null,streamId:null,actionsDisabled:null};
+    if(b.profile==='long-v1')Object.assign(fresh,{originMs:begin,sessionHistoryDropped:0,longEvidence:evidence.fresh()});
     const s=same?copy(parent.state):fresh;
     return {...s,...h,closed:false,terminal:false,reason:null,updatedMs:begin,sessionStartedMs:begin,
       sessions:s.sessions+1,phase:'starting',pipeline:snapshots.capture(pipeline)};
   });
   if(!claim.accepted){done(claim.reason);return;}
   owned=claim.header;state=claim.state;
+  if(state.longEvidence)state.longEvidence.generations.push(state.generation);
   let nextCheckpoint=begin+30000,signalCheck=null,cachedStop=null,cachedObserve=null,lastFrame=null;
   function event(type,fields={}){state.events.push({atMs:now(),type,...fields});if(state.events.length>96)state.events.shift();}
   function signals(force=false){
@@ -1031,6 +1229,10 @@ function start(o){
   function persist(){
     if(store.read(ownership.HEAD)!==owned)throw Error('ownership_changed');
     state.pipeline=snapshots.capture(pipeline);state.updatedMs=now();
+    if(state.longEvidence){
+      for(const a of state.actions)evidence.boundAction(a);
+      state.longEvidence.maxSavedBytes=Math.max(state.longEvidence.maxSavedBytes,byteLength(JSON.stringify(state))+16);
+    }
     const raw=JSON.stringify(state);if(byteLength(raw)>MAX_STATE)throw Error('evidence_capacity');
     const k=ownership.key(state.generation,'state');
     if(store.write(k,raw)!==true||store.read(k)!==raw)throw Error('state_write_failed');
@@ -1039,12 +1241,20 @@ function start(o){
     if(ended)return;ended=true;token++;pending=null;
     state.closed=true;state.terminal=!handoff;state.reason=reason;state.phase=handoff?'handoff':'ended';
     state.endedMs=o.now();state.sessionHistory.push({sessionId:o.sessionId,start:sessionStart,end:state.endedMs,reason});
+    if(state.longEvidence&&state.sessionHistory.length>16){state.sessionHistory.shift();state.sessionHistoryDropped++;}
     state.events.push({atMs:state.endedMs,type:'session_closed',reason});if(state.events.length>96)state.events.shift();let saved=false;
-    try{persist();saved=true;}catch(_){/* Incomplete ownership remains blocked. Never reset the splitter. */}
+    try{persist();if(state.longEvidence){evidence.retire(state,store,owned,handoff?2:1);persist();}saved=true;}
+    catch(_){/* Incomplete ownership remains blocked. Never reset the splitter. */}
     done(reason,{saved,closed:true,terminal:state.terminal,samples:state.samples,invocations:state.invocations});
   }
   function guard(fn){if(ended)return;try{fn();}catch(e){finish(e&&/^[a-z_]{1,80}$/.test(e.message)?e.message:'runtime_error');}}
   function later(fn,delay){o.schedule(()=>guard(fn),Math.max(1,delay));}
+  function yieldOrFinish(){
+    // A wall-clock deadline can coincide with a cron boundary. Close in the
+    // final 300 ms reserve instead of leaving a handoff nobody may resume.
+    const final=b.profile==='long-v1'&&b.expiresMs-sessionDeadline<=RESERVE;
+    finish(final?'trial_complete':'normal_yield',!final);
+  }
   function phase(t){
     if(state.originMs===null)return 'awaiting_download';
     const elapsed=t-state.originMs;return elapsed<b.referenceMs?'reference':elapsed<b.durationMs-b.tailMs?'actions':
@@ -1064,9 +1274,9 @@ function start(o){
         a.firstThresholdMs=f.received_ms;
     }
     for(const a of state.actions){
-      if(a.startedMs===null||row[0]<=a.startedMs||row[0]-a.startedMs>20000||
+      if(a.startedMs===null||row[0]<=a.startedMs||row[0]-a.startedMs>(state.longEvidence?30000:20000)||
         (a.followupEndMs!==null&&row[0]>=a.followupEndMs))continue;
-      if(a.followup.length<102&&(!a.followup.length||row[0]-a.followup.at(-1)[0]>=190))a.followup.push(row);
+      if(a.followup.length<102&&(!a.followup.length||row[0]-a.followup.at(-1)[0]>=(state.longEvidence?390:190)))a.followup.push(row);
     }
   }
   function diagnostic(f){
@@ -1102,13 +1312,13 @@ function start(o){
     if(signals()){finish('operator_stop');return;}
     if(t>=b.expiresMs||phase(t)==='ended'){finish('trial_complete');return;}
     if(state.originMs===null&&t-state.runStartedMs>=(b.waitTargetMs??120000)){finish('no_target_within_wait_budget');return;}
-    if(t>=sessionDeadline){finish('normal_yield',true);return;}
+    if(t>=sessionDeadline){yieldOrFinish();return;}
     const generation=++token;let replied=false;
     later(()=>{if(!replied&&generation===token)finish('read_timeout');},1000);
     o.api('GET','/v1/requests/active',null,payload=>guard(()=>{
       if(replied||generation!==token)return;replied=true;const end=now();
       if(end>=b.expiresMs||phase(end)==='ended'){finish('trial_complete');return;}
-      if(end>=sessionDeadline){finish('normal_yield',true);return;}
+      if(end>=sessionDeadline){yieldOrFinish();return;}
       if(!payload||!Array.isArray(payload.requests))throw Error('invalid_requests_shape');
       const relevant=payload.requests.filter(r=>{const dest=endpoint(r.URL);return dest&&dest.host===b.host&&dest.port===443&&
         r.local===true&&r.deviceName===b.deviceName&&r.completed===false&&r.failed===false;});
@@ -1124,12 +1334,13 @@ function start(o){
       state.phase=phase(end);record(f);
       const d=b.mode==='diagnostic'?diagnostic(f):pipeline.consider(f);
       state.gateReasons[d.reason]=(state.gateReasons[d.reason]||0)+1;if(d.row)state.eligible++;
+      if(state.longEvidence)evidence.observe(state,f,d,compact(f));
       if(d.row&&mayAct(end)){
         if(pending){
           const fresh=b.mode==='diagnostic'?(fingerprint(pending.row)===fingerprint(d.row)&&d.row.inBytes>pending.row.inBytes?
             d:{row:null}):pipeline.revalidate(pending,f,now());pending=null;
           if(fresh.row&&action(f,fresh))return;
-        }else pending={row:d.row,receivedMs:end};
+        }else pending={row:d.row,reason:d.reason,receivedMs:end};
       }else pending=null;
       if(end>=nextCheckpoint){persist();nextCheckpoint=end+30000;}
       // Only absence of all target connections lowers frequency. Buffered WAIT
@@ -1138,7 +1349,8 @@ function start(o){
       later(tick,Math.min(Math.max(1,t+period-now()),Math.max(1,sessionDeadline-now())));
     }));
   }
-  guard(()=>{event('session_started',{generation:state.generation});persist();tick();});
+  guard(()=>{event('session_started',{generation:state.generation});persist();
+    if(state.longEvidence){evidence.retire(state,store,owned);persist();}tick();});
   return {inspect:()=>copy(state),lastFrame:()=>lastFrame,stop:()=>finish('local_stop')};
 }
 module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
@@ -1166,12 +1378,15 @@ function validateService(s){
 }
 function validateTask(t){
   const active=t?.kind==='execute';
-  const keys='runId,kind,delayMs,startGraceMs,waitTargetMs,durationMs'+(active?',maxAttempts,referenceMs,tailMs':'');
+  const extended=t?.profile==='long-v1';
+  const keys='runId,kind,delayMs,startGraceMs,waitTargetMs,durationMs'+(active?',maxAttempts,referenceMs,tailMs':'')+
+    (t&&'profile' in t?',profile':'');
   if(!exact(t,keys)||!id(t.runId)||
     !['observe','probe','execute'].includes(t.kind)||!['delayMs','startGraceMs','waitTargetMs','durationMs'].every(k=>integer(t[k]))||
     t.delayMs>86400000||t.startGraceMs<PERIOD||t.startGraceMs>1800000||
-    (t.kind!=='probe'&&(t.durationMs<5000||t.durationMs>900000||t.waitTargetMs<1000||t.waitTargetMs>300000||
-      t.waitTargetMs+t.durationMs>1200000))||
+    ('profile' in t&&(!extended||t.kind==='probe'))||
+    (t.kind!=='probe'&&(t.durationMs<5000||t.durationMs>(extended?86400000:900000)||
+      (extended?t.waitTargetMs!==0:t.waitTargetMs<1000||t.waitTargetMs>300000||t.waitTargetMs+t.durationMs>1200000)))||
     (t.kind==='probe'&&(t.waitTargetMs!==0||t.durationMs!==PERIOD)))throw Error('invalid_task');
   if(active&&(!['maxAttempts','referenceMs','tailMs'].every(k=>integer(t[k]))||
     t.maxAttempts<1||t.maxAttempts>30||t.referenceMs<60000||t.tailMs<60000||
@@ -1181,6 +1396,7 @@ function validateTask(t){
 function bindingFor(s,t,now){
   const end=now+t.waitTargetMs+t.durationMs;
   return {enabled:true,runId:t.runId,mode:t.kind==='execute'?'execute':'observe',host:s.host,deviceName:s.deviceName,
+    ...(t.profile?{profile:t.profile}:{}),
     expectedBuild:s.expectedBuild,expectedModel:s.expectedModel,notBeforeMs:now,
     latestStartMs:Math.min(now+PERIOD,end-1),expiresMs:end,durationMs:t.durationMs,
     waitTargetMs:t.waitTargetMs,referenceMs:t.referenceMs??0,tailMs:t.tailMs??0,maxAttempts:t.maxAttempts??0,diagnostic:null};
@@ -1226,6 +1442,17 @@ function context(s,o){
     const claimed=owner.begin(store,h,s.installationId,o.sessionId,o.codeId,header=>({
       ...header,closed:true,terminal:true,service:canonical(s),clockMs:o.now(),current:next.current,history:next.history}));
     if(!claimed.accepted)throw Error('job_control_busy');
+    if(next.current?.task.profile==='long-v1'&&claimed.state.generation>=2){
+      const k=owner.key(claimed.state.generation-2,'state'),raw=store.read(k);
+      if(raw!==null){const prior=owner.parse(raw);
+        if(prior.retired!==true&&(!prior.closed||!prior.terminal||prior.runId!==s.installationId||prior.codeId!==o.codeId))
+          throw Error('control_retention_mismatch');
+        const small=JSON.stringify({version:1,retired:true,generation:claimed.state.generation-2,
+          runId:s.installationId,copiedInto:claimed.state.generation});
+        if(store.read(owner.HEAD)!==claimed.header||store.write(k,small)!==true||store.read(k)!==small)
+          throw Error('control_retention_failed');
+      }
+    }
     return claimed.state;
   }
   return {head,transaction,key,put};
@@ -1265,6 +1492,25 @@ function status(s,o,runId=null){
   return {status:result.phase,job:result,runtime,nowMs:o.now()};
 }
 const terminal=j=>['cancelled','expired','finished'].includes(j.phase);
+function compactCompleted(s,o){
+  const c=context(s,o),h=c.head();
+  const closed=[...(h.state?.history||[]),h.state?.current].filter(j=>j?.task.profile==='long-v1'&&j.resultKey&&terminal(j));
+  // Keep the four newest completed long-run payloads. Older task summaries and
+  // non-reusable run IDs remain; pre-long-v1 and other installations are untouched.
+  for(const j of closed.slice(0,-4)){
+    const old=owner.parse(o.read(j.resultKey));if(old.evidenceRetired===true)continue;
+    if(old.runId!==j.task.runId||old.codeId!==o.codeId||!old.closed||!old.terminal||
+      canonical(JSON.parse(old.binding))!==canonical(j.binding))throw Error('completed_retention_mismatch');
+    const active=owner.head({read:o.read});
+    if(active.state?.generation===old.generation)throw Error('cannot_retire_current_head');
+    const summary={evidenceRetired:true};
+    for(const key of ['version','generation','runId','codeId','binding','closed','terminal','reason','originMs',
+      'samples','sessions','invocations','attemptsReserved','updatedMs'])summary[key]=old[key];
+    const raw=JSON.stringify(summary);
+    if(c.head().raw!==h.raw||o.write(raw,j.resultKey)!==true||o.read(j.resultKey)!==raw)
+      throw Error('completed_retention_failed');
+  }
+}
 function archive(state,j){state.history.push(j);if(state.history.length>16)state.history.shift();}
 function submit(s,o,t,replaces=null){
   validateTask(t);
@@ -1321,6 +1567,7 @@ function admit(s,o,role){
   const view=status(s,o),j=view.job,now=o.now();
   if(!j||terminal({...j,phase:view.status}))return {reason:'idle'};
   if(j.task.kind!=='probe'&&role==='peer')return {reason:'idle'};
+  if(j.task.profile==='long-v1'&&role==='worker')compactCompleted(s,o);
   if(j.task.kind==='execute'&&o.capabilities?.actionsQualified!==true)return {reason:'active_build_not_qualified'};
   if(j.phase==='stopping')return {job:j,reason:'stopping'};
   if(now<j.notBeforeMs)return {reason:'waiting'};
@@ -1339,7 +1586,7 @@ function admit(s,o,role){
 }
 function complete(s,o,runId,reason){
   const c=context(s,o);
-  return c.transaction(state=>{
+  const state=c.transaction(state=>{
     if(state.current?.task.runId!==runId)throw Error('job_changed');
     if(state.current.task.kind!=='probe'){
       const h=owner.head({read:o.read});
@@ -1350,6 +1597,8 @@ function complete(s,o,runId,reason){
     }
     state.current.phase='finished';state.current.reason=reason;state.current.endedMs=o.now();return state;
   });
+  if(state.current.task.profile==='long-v1')compactCompleted(s,o);
+  return state;
 }
 function control(q,o){
   if(!exact(q,'requestId,operation,service,codeId,task,runId,replaces')||!/^[a-f0-9]{32}$/.test(q.requestId)||
@@ -1373,7 +1622,8 @@ function control(q,o){
     }
     if(q.operation==='status'&&result.runtime){const r=result.runtime;
       result.runtime={runId:r.runId,closed:r.closed,terminal:r.terminal,reason:r.reason,samples:r.samples,
-        sessions:r.sessions,originMs:r.originMs,invocations:r.invocations,attemptsReserved:r.attemptsReserved};}
+        sessions:r.sessions,originMs:r.originMs,invocations:r.invocations,attemptsReserved:r.attemptsReserved,
+        ...(r.evidenceRetired?{evidenceRetired:true}:{})};}
   }
   return {requestId:q.requestId,operation:q.operation,...result};
 }
