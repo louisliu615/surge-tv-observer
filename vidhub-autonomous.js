@@ -1,4 +1,4 @@
-// Version a2997f4c253f3b4b37f590cd5f7efb223c35acf7f6e2e23d3ea88bb1297f18e5; phase: lifecycle candidate; policy and sampling unchanged, action-trial build; runtime acceptance pending.
+// Version 24ebda7881e8913855f4e61bfac62b8f089cea4c0390a94e72e3f751123fa468; phase: bounded long-trial candidate (up to 100 attempts); policy and sampling unchanged, action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="a2997f4c253f3b4b37f590cd5f7efb223c35acf7f6e2e23d3ea88bb1297f18e5";
+const __codeId="24ebda7881e8913855f4e61bfac62b8f089cea4c0390a94e72e3f751123fa468";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -907,11 +907,11 @@ module.exports={Pipeline,MeasurementGate,Replacement,POLICY,fingerprint};
 };
 __factories["src/autonomous/schedule"]=function(module,exports,require){
 'use strict';
-// One reviewed schedule for runtime, bundle entry, profile generation and preflight.
+// One reviewed schedule and task limits for runtime, generation and preflight.
 // Longer periods require separate tvOS lifetime acceptance before this value changes.
 module.exports=Object.freeze({periodMs:120000,cron:'0 */2 * * * *',timeoutSeconds:120,
   reserveMs:300,checkpointMs:30000,readTimeoutMs:1000,readRetryMs:[1000,2000,4000],
-  takeoverGraceMs:0,healthStaleMs:45000});
+  takeoverGraceMs:0,healthStaleMs:45000,finiteMaxAttempts:30,longMaxAttempts:100});
 
 };
 __factories["src/autonomous/ownership"]=function(module,exports,require){
@@ -953,7 +953,7 @@ function parse(raw,max=524288){
 }
 // Sealed excerpts are immutable and named by run/sequence. The generation state
 // is the commit index: write/read back every page BEFORE committing that index.
-// A crash can leave at most one unreferenced page per action (max 30), never a
+// A crash can leave at most one unreferenced page per action (max 100), never a
 // committed action whose page was intentionally skipped. Critical accounting,
 // callbacks, timestamps and pipeline continuation stay in the generation state.
 const DETAIL=['before','followup','decision','pre_action_targets','detailSamplesOmitted'];
@@ -1247,7 +1247,8 @@ function validate(b){
     ('profile' in b&&!extended)||
     b.expiresMs<=b.latestStartMs||b.expiresMs-b.notBeforeMs>(extended?86400000:1200000)||
     b.durationMs<5000||b.durationMs>(extended?86400000:900000)||b.referenceMs+b.tailMs>=b.durationMs||
-    b.maxAttempts>30||(b.mode==='observe'&&b.maxAttempts!==0)||(b.mode==='execute'&&b.maxAttempts<1)||
+    b.maxAttempts>(extended?schedule.longMaxAttempts:schedule.finiteMaxAttempts)||
+    (b.mode==='observe'&&b.maxAttempts!==0)||(b.mode==='execute'&&b.maxAttempts<1)||
     ('waitTargetMs' in b&&(!integer(b.waitTargetMs)||(extended?b.waitTargetMs!==0:b.waitTargetMs<1000||b.waitTargetMs>300000)))||
     (extended&&(b.mode==='diagnostic'||b.expiresMs!==b.notBeforeMs+b.durationMs)))
     throw Error('invalid_configuration');
@@ -1538,7 +1539,8 @@ function validateTask(t){
       (extended?t.waitTargetMs!==0:t.waitTargetMs<1000||t.waitTargetMs>300000||t.waitTargetMs+t.durationMs>1200000)))||
     (t.kind==='probe'&&(t.waitTargetMs!==0||t.durationMs!==PERIOD)))throw Error('invalid_task');
   if(active&&(!['maxAttempts','referenceMs','tailMs'].every(k=>integer(t[k]))||
-    t.maxAttempts<1||t.maxAttempts>30||t.referenceMs<60000||t.tailMs<60000||
+    t.maxAttempts<1||t.maxAttempts>(extended?schedule.longMaxAttempts:schedule.finiteMaxAttempts)||
+    t.referenceMs<60000||t.tailMs<60000||
     t.referenceMs+t.tailMs>=t.durationMs))throw Error('invalid_action_limits');
   return t;
 }
@@ -1664,7 +1666,7 @@ function compactCompleted(s,o){
     }
     // A crash after index commit must not permanently skip page reclamation.
     // Index now refers to a summary; remove only this retired run's bounded pages.
-    for(let i=1;i<=30;i++){const k=owner.pageKey(old.runId,i);
+    for(let i=1;i<=schedule.longMaxAttempts;i++){const k=owner.pageKey(old.runId,i);
       if(o.read(k)!==null&&(o.write(null,k)!==true||o.read(k)!==null))throw Error('evidence_retention_failed');}
   }
 }

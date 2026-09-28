@@ -1,9 +1,10 @@
-# Finite TV trial service: lifecycle update
+# Finite TV trial service: 100-attempt long-trial budget
 
-Build identity: `a2997f4c253f3b4b37f590cd5f7efb223c35acf7f6e2e23d3ea88bb1297f18e5`.
+Build identity: `24ebda7881e8913855f4e61bfac62b8f089cea4c0390a94e72e3f751123fa468`.
 
-This release combines decision explanations, a single-worker normal layout,
-bounded fault recovery, and separate action evidence storage. Publishing these
+This release extends the explicit long-trial cumulative allowance to 100 attempts
+and reclaims all corresponding evidence pages. It retains decision explanations,
+a single-worker layout, bounded recovery and separate action evidence storage. Publishing these
 files does not change a TV configuration, submit a task, or terminate a connection.
 Use an immutable commit URL and a fresh private installation identity; verify the
 previous task is closed before upgrading. The service is idle until a separately
@@ -34,7 +35,8 @@ failure retries described below do not extend slow-download protection.
 Legacy short tasks retain their fifteen-minute limits. Explicit `long-v1` tasks
 allow up to 24 hours of wall-clock time from worker admission, with an absolute
 expiry. Pauses, video changes, session handoffs and faults do not restart that
-clock. Active tasks need an explicit cumulative allowance of 1 to 30 attempts;
+clock. Long active tasks need an explicit cumulative allowance of 1 to 100 attempts;
+short tasks retain their 30-attempt ceiling;
 the first and last minute or longer are observation only. Exhausting the allowance
 leaves observation until expiry. A completed task does not restart automatically.
 Read-only tasks cannot terminate connections. `actionsQualified` is a build
@@ -76,7 +78,8 @@ seconds and around actions, handoffs and closure. Action allowance reservation
 is saved and read back before dispatch. Recent ordinary samples can be lost on an
 abrupt process exit; this does not refund action reservations.
 
-After an action excerpt is complete, it is written once as an immutable page.
+Each long task has at most 100 action pages. After an action excerpt is complete,
+it is written once as an immutable page.
 The page is written and verified before its reference is committed to the runtime
 ledger. Small outcome metrics can still evolve. Status skips these pages while
 full export reconstructs the existing action record shape. Status still reads
@@ -109,15 +112,16 @@ configuration, device bindings, target domains, credentials, raw traces and loca
 source manifests are excluded. Configuration cleanup and deployment preparation
 remain local tooling operations, not effects of publishing or running this file.
 
-The matching build passed 315 local checks: compiled entry and store-only helpers,
-13,704 historical frames, unchanged healthy-path sampling/action timings,
-late callbacks, hard-deadline takeover, uncertain actions, expiry, read failures,
-engine changes, evidence commits/reclamation and old release compatibility. A
-virtual 24-hour run covered 720 sessions and the full 30-attempt allowance.
+The matching build passed 330 local checks, including 13,704 historical frames
+with unchanged decisions and a synthetic 20-hour run across 600 sessions. That
+run consumed exactly 100 cumulative attempts, preserved the five-second guard,
+retained all 100 action pages, and closed at expiry. Duplicate launches and
+submissions did not replenish the allowance. Stop, unknown action outcome, old
+release rejection, and page reclamation through action 100 were also checked.
+The previous 24-hour/30-attempt simulation remains part of regression coverage.
 
-A synthetic ten-minute 30-action workload reduced storage API write payload bytes
-by about 61%; the number of writes increased due to separate immutable pages.
-No-action workloads wrote about 1.5%-2.7% more bytes for health fields. These are
-application payload measurements, not disk writes, CPU or power measurements.
-Actual TV lifecycle, concurrency, longer sessions and power costs still require
-hardware acceptance. This release does not claim permanent unattended readiness.
+In the 20-hour synthetic run the largest stored runtime state was 156,334 bytes,
+the complete export was 813,151 bytes, and the simulated store held 992,715 bytes.
+These are bounded synthetic application records, not a hard whole-device storage
+limit or a CPU/power measurement. Physical TV lifecycle and performance acceptance
+remain necessary. This release does not claim permanent unattended readiness.
