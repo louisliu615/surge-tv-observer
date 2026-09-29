@@ -1,11 +1,29 @@
-# Continuous TV worker with expiring manual allowances
+# Continuous TV worker: allowance clock ordering fix
 
-Build identity: `93e3e7774375cd2cd822455704d4f1a179183fa035d53fdfd1bdf24851d5a367`. Local verification: 373 checks passed.
+Build identity: `da4dcbcd663da1872fbf07c5824a8f1aa0347a73c88061390d06dcfcd6ce25b4`. Local verification: 377 checks passed.
 
 This release adds `continuous-v1` to the existing finite task service. Installing
 or publishing it does not submit a task or terminate a connection. Use immutable
 commit URLs, verify the previous task has ended, and retain the private budget
 scope across upgrades. TV acceptance of these new lifecycle paths is pending.
+
+## Fix in this release
+
+Action admission now reads wall time after refreshing control signals and the
+allowance ledger. Previously, normal processing time could make an earlier
+measurement timestamp look like a clock rollback and terminally lock a continuous
+task. Real backward-clock protection, stale-sample rejection, rolling consumption,
+sampling frequency, and all connection decision rules remain unchanged.
+
+Four new regression checks run the compiled bundle with time advancing within
+callbacks: the frozen previous release reproduces the defect; the fixed bundle
+continues through actions and handoff; genuine rollback still locks; and delayed
+reservation persistence still prevents dispatch from stale evidence.
+
+This release does not clear existing fault locks or resume a stopped task.
+Recovery requires a separately reviewed maintenance operation preserving prior
+consumption and fault evidence. Unknown actions must remain locked. No external
+notification destination is added. Hardware acceptance of this fix is pending.
 
 ## Running and stopping
 

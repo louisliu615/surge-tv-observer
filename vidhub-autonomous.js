@@ -1,4 +1,4 @@
-// Version 93e3e7774375cd2cd822455704d4f1a179183fa035d53fdfd1bdf24851d5a367; phase: continuous candidate; rolling quota and expiring topups; policy and sampling unchanged, action-trial build; runtime acceptance pending.
+// Version da4dcbcd663da1872fbf07c5824a8f1aa0347a73c88061390d06dcfcd6ce25b4; phase: continuous candidate; rolling quota and expiring topups; policy and sampling unchanged, action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="93e3e7774375cd2cd822455704d4f1a179183fa035d53fdfd1bdf24851d5a367";
+const __codeId="da4dcbcd663da1872fbf07c5824a8f1aa0347a73c88061390d06dcfcd6ce25b4";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -1680,7 +1680,10 @@ function start(o){
     const elapsed=t-state.originMs;return elapsed<b.referenceMs?'reference':elapsed<(b.durationMs??Number.MAX_SAFE_INTEGER)-b.tailMs?'actions':
       elapsed<(b.durationMs??Number.MAX_SAFE_INTEGER)?'tail':'ended';
   }
-  function mayAct(t,reserved=false){const stopped=signals(true);return !stopped&&!ended&&o.capabilities?.actionsQualified===true&&b.mode!=='observe'&&
+  function mayAct(reserved=false){
+    // signals can advance the durable allowance clock. Admission must use time
+    // read after that refresh, never the earlier measurement timestamp.
+    const stopped=signals(true),t=now();return !stopped&&!ended&&o.capabilities?.actionsQualified===true&&b.mode!=='observe'&&
     !state.actionsDisabled&&(reserved?state.attemptsReserved<=cap:state.attemptsReserved<cap)&&
     (!cont||(!state.continuous.faultLocked&&(reserved||allowance.view(state.continuous.allowance,t).remaining>0)))&&phase(t)==='actions'&&
     t<expiry&&t<sessionDeadline&&store.read(ownership.HEAD)===owned;}
@@ -1708,7 +1711,7 @@ function start(o){
     return {row:r,reason:'explicit_single_diagnostic_not_low_speed'};
   }
   function action(f,d,first){
-    if(!mayAct(now()))return false;
+    if(!mayAct())return false;
     const before=[];for(const r of state.recent)if(!before.length||r[0]-before.at(-1)[0]>=190)before.push(r);
     const a={sequence:state.attemptsReserved+1,connection:{...d.row},pre_action_targets:f.targets,
       reservedMs:now(),startedMs:null,completedMs:null,status:'reserved_unknown',kind:b.mode,
@@ -1718,7 +1721,7 @@ function start(o){
     if(cont){const reservation=allowance.reserve(state.continuous.allowance,now());
       if(!reservation.allowed)return false;state.continuous.allowance=reservation.next;a.allowance=reservation.source;}
     state.actions.push(a);state.attemptsReserved++;event('action_reserved',{sequence:a.sequence});persist();
-    let t=now();const allowed=mayAct(t,true);t=now();
+    const allowed=mayAct(true),t=now();
     if(!allowed||(a.allowance?.kind==='grant'&&t>=a.allowance.expiresMs)||t>=sessionDeadline||t>=expiry||t-f.received_ms<0||t-f.received_ms>250){finish('reserved_dispatch_cancelled');return true;}
     const prev=state.actions.at(-2);if(prev)prev.followupEndMs=t;
     a.startedMs=t;state.invocations++;pipeline.afterAction(a,t);pending=null;
@@ -1785,7 +1788,7 @@ function start(o){
       const d=b.mode==='diagnostic'?diagnostic(f):pipeline.consider(f);
       state.gateReasons[d.reason]=(state.gateReasons[d.reason]||0)+1;if(d.row)state.eligible++;
       if(state.longEvidence)evidence.observe(state,f,d,compact(f),pipeline);
-      if(d.row&&mayAct(end)){
+      if(d.row&&mayAct()){
         if(pending){
           const first=pending;
           const fresh=b.mode==='diagnostic'?(fingerprint(pending.row)===fingerprint(d.row)&&d.row.inBytes>pending.row.inBytes?
