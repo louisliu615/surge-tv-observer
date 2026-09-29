@@ -1,4 +1,4 @@
-// Version 24ebda7881e8913855f4e61bfac62b8f089cea4c0390a94e72e3f751123fa468; phase: bounded long-trial candidate (up to 100 attempts); policy and sampling unchanged, action-trial build; runtime acceptance pending.
+// Version 93e3e7774375cd2cd822455704d4f1a179183fa035d53fdfd1bdf24851d5a367; phase: continuous candidate; rolling quota and expiring topups; policy and sampling unchanged, action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="24ebda7881e8913855f4e61bfac62b8f089cea4c0390a94e72e3f751123fa468";
+const __codeId="93e3e7774375cd2cd822455704d4f1a179183fa035d53fdfd1bdf24851d5a367";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -830,8 +830,9 @@ class Replacement{
 }
 class Pipeline{
   constructor(profile=null){
-    if(profile!==null&&profile!=='long-v1')throw Error('invalid_pipeline_profile');
-    this.review=profile==='long-v1'?new RecoveryReview():null;
+    if(profile!==null&&!['long-v1','continuous-v1'].includes(profile))throw Error('invalid_pipeline_profile');
+    this.continuous=profile==='continuous-v1';
+    this.review=profile!==null?new RecoveryReview():null;
     const fields=Object.fromEntries(['id','inBytes','local','deviceName','completed','failed'].map(k=>[k,[k]]));
     fields.url=['URL'];this.adapt=create({verified:true,rowsPath:['requests'],fields});
     this.detector=new Detector();this.detector.protect();this.gate=new MeasurementGate();
@@ -847,7 +848,10 @@ class Pipeline{
       const fp=fingerprint(row);
       if(expectedEngine!==undefined&&row.engine!==expectedEngine)throw Error('engine_changed');
       if(this.seen.has(row.id)&&this.seen.get(row.id)!==fp)throw Error('reused_connection_identity');
-      this.seen.set(row.id,fp);if(this.seen.size>(this.review?1024:256))throw Error('identity_history_capacity');
+      this.seen.set(row.id,fp);
+      if(this.continuous&&this.seen.size>1024){const present=new Set(mapped.map(r=>r.id));
+        for(const id of this.seen.keys())if(!present.has(id)){this.seen.delete(id);break;}}
+      if(this.seen.size>(this.review?1024:256))throw Error('identity_history_capacity');
       return row;
     });
     const time_s=(beginMs+endMs)/2000,read_ms=endMs-beginMs;
@@ -917,7 +921,8 @@ module.exports=Object.freeze({periodMs:120000,cron:'0 */2 * * * *',timeoutSecond
 __factories["src/autonomous/ownership"]=function(module,exports,require){
 'use strict';
 // One-shot splitter, NOT a reusable read/write lease. Each generation uses new
-// registers, never reopened/deleted by a running worker. The at-most-one-winner
+// registers, never reused. Continuous mode reclaims old generations only after
+// HEAD has advanced; begin fences every claim write against its parent HEAD. The at-most-one-winner
 // proof requires individually atomic, coherent read/write registers; Surge's
 // cross-JSC store semantics must still be qualified on the actual TV.
 const schedule=require('./schedule');
@@ -927,7 +932,7 @@ const key=(g,s)=>PREFIX+'-g'+g+'-'+s;
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const identity=x=>typeof x==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(x);
 function* splitter(g,id){
-  if(!integer(g)||g>100000||!identity(id))throw Error('invalid_owner_identity');
+  if(!integer(g)||!identity(id))throw Error('invalid_owner_identity');
   yield {op:'write',key:key(g,'race'),value:id};
   const door=yield {op:'read',key:key(g,'door')};
   if(door!==null)return false;
@@ -1008,20 +1013,23 @@ function health(s,t){
   else if(!s.closed&&s.readFailures>0)state='retrying_read';
   else if(!s.closed&&s.lastTargetCount===0)state='waiting_target';
   else if(!s.closed&&s.lastTrafficState==='WAIT')state='waiting_download';
-  const afterDeadline=t>=JSON.parse(s.binding).expiresMs;
+  const expiry=JSON.parse(s.binding).expiresMs;
+  const afterDeadline=expiry!==null&&t>=expiry;
   if(afterDeadline&&!s.terminal)state='expired_awaiting_close';
   return {state,lastSuccessfulReadMs:s.lastSuccessfulReadMs??s.lastSampleMs??null,
     checkpointMs:s.updatedMs,sessionDeadlineMs:s.sessionDeadlineMs??null,
     expiresMs:JSON.parse(s.binding).expiresMs,readFailures:s.readFailures??0,
     readErrors:s.readErrors??0,recoveries:s.recoveries??0,lastFault:s.lastFault??null,
-    actionsBlocked:s.terminal||state==='interrupted'||state==='unresponsive'||state==='retrying_read'||afterDeadline,
+    diagnostics:s.diagnostics?{faultCounts:s.diagnostics.faultCounts,faultsDropped:s.diagnostics.faultsDropped,
+      lastFault:s.diagnostics.faults.at(-1)??null,maxSavedGap:s.diagnostics.maxSavedGap}:null,
+    actionsBlocked:s.terminal||s.continuous?.faultLocked===true||state==='interrupted'||state==='unresponsive'||state==='retrying_read'||afterDeadline,
     afterDeadline};
 }
 function head(store,details=true){
   const raw=store.read(HEAD);if(raw===null)return {raw:null,value:null,state:null};
   const h=parse(raw,2048);
   if(Object.keys(h).sort().join()!=='codeId,generation,runId,sessionId,version'||h.version!==1||
-    !integer(h.generation)||h.generation>100000||!identity(h.sessionId)||!identity(h.runId)||
+    !integer(h.generation)||!identity(h.sessionId)||!identity(h.runId)||
     typeof h.codeId!=='string'||!/^[a-f0-9]{64}$/.test(h.codeId))throw Error('invalid_head');
   const s=parse(store.read(key(h.generation,'state')));
   if(s.generation!==h.generation||s.sessionId!==h.sessionId||s.runId!==h.runId||s.codeId!==h.codeId||
@@ -1034,7 +1042,11 @@ function begin(store,parent,runId,sessionId,codeId,makeState,recoveryAt=null){
     parent.state.codeId===codeId&&integer(parent.state.sessionDeadlineMs)&&recoveryAt>=parent.state.sessionDeadlineMs+schedule.takeoverGraceMs;
   if(parent.state&&((!parent.state.closed&&!fenced)||(!parent.state.terminal&&parent.state.runId!==runId)))
     return {accepted:false,reason:'previous_worker_not_closed'};
-  if(!claim(store,generation,sessionId))return {accepted:false,reason:'splitter_not_won'};
+  const fencedStore={read:store.read,write:(k,v)=>{
+    if(store.read(HEAD)!==parent.raw)throw Error('parent_changed_during_claim');
+    return store.write(k,v);
+  }};
+  if(!claim(fencedStore,generation,sessionId))return {accepted:false,reason:'splitter_not_won'};
   if(store.read(HEAD)!==parent.raw)throw Error('parent_changed_during_claim');
   const h={version:1,generation,runId,sessionId,codeId};
   const s=makeState(h);const raw=writer(store)(s),header=JSON.stringify(h);
@@ -1076,7 +1088,7 @@ function inspectJSON(x,depth=0){
 }
 function capture(p){
   const s=p.startup;
-  return copy({version:1,...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
+  return copy({version:1,...(p.continuous?{continuous:true}:{}),...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
     startup:{clock:s.clock,previous:s.previous?{...s.previous,rows:[...s.previous.rows]}:null,
       history:s.history,tracks:[...s.tracks],quietSince:s.quietSince,waiting:s.waiting,waitOrigin:s.waitOrigin,
       start:s.start,end:s.end,source:s.source,episode:s.episode,awaitOwnSuccessor:s.awaitOwnSuccessor},
@@ -1086,9 +1098,10 @@ function capture(p){
 }
 function restore(x){
   if(JSON.stringify(x).length>196608)throw Error('snapshot_capacity');inspectJSON(x);
-  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[])]);
+  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[]),...('continuous' in x?['continuous']:[])]);
   if(x.version!==1||!(x.lastTime===null||finite(x.lastTime)))throw Error('snapshot_version');
-  const p=new Pipeline('review' in x?'long-v1':null);if(!p.detector.restore(x.core))throw Error('snapshot_core');
+  if('continuous' in x&&x.continuous!==true)throw Error('snapshot_profile');
+  const p=new Pipeline(x.continuous?'continuous-v1':'review' in x?'long-v1':null);if(!p.detector.restore(x.core))throw Error('snapshot_core');
   if(p.review){
     const r=x.review;exact(r,Object.keys(p.review.s));
     if(!times(r,['actionAt','quietAt','emptyAt','emptyLast','entryAt'])||typeof r.hadTarget!=='boolean'||!integer(r.rescues)||r.rescues>1||
@@ -1156,7 +1169,8 @@ function observe(s,f,d,compact,pipeline){
   const e=s.longEvidence,t=f.received_ms,index=Math.floor((t-s.runStartedMs)/300000);
   let bin=e.timeline.at(-1);
   if(!bin||bin.index!==index){
-    if(e.timeline.length>=291)throw Error('timeline_capacity');
+    if(s.continuous){e.timeline=e.timeline.filter(b=>b.index>index-288);}
+    else if(e.timeline.length>=291)throw Error('timeline_capacity');
     bin={index,startMs:t,endMs:t,samples:0,bytes:0,download:0,waiting:0,uncertain:0,
       eligible:0,maxRate:0,rateSum:0,rateSamples:0,maxReadMs:0};e.timeline.push(bin);
   }
@@ -1216,6 +1230,236 @@ function validate(e){
 module.exports={fresh,observe,boundAction,retire,validate};
 
 };
+__factories["src/autonomous/diagnostics"]=function(module,exports,require){
+'use strict';
+// Evidence only. No decision gates, network calls or automatic fault attribution.
+const LIMIT=32;
+const integer=x=>Number.isSafeInteger(x)&&x>=0;
+const fresh=()=>({version:1,faults:[],faultsDropped:0,faultCounts:{},maxSavedGap:null});
+const TYPES=['session_interrupted','read_failure','terminal_fault','engine_rebaseline'];
+function validate(d){
+  if(!d||d.version!==1||!Array.isArray(d.faults)||d.faults.length>LIMIT||!integer(d.faultsDropped)||
+    !d.faultCounts||Object.keys(d.faultCounts).some(k=>!TYPES.includes(k)||!integer(d.faultCounts[k]))||
+    Object.values(d.faultCounts).reduce((a,b)=>a+b,0)!==d.faults.length+d.faultsDropped)
+    throw Error('invalid_diagnostic_ledger');
+  for(const f of d.faults){
+    if(!TYPES.includes(f.type)||!integer(f.detectedMs)||!integer(f.generation)||
+      typeof f.sessionId!=='string'||f.sessionId.length>80||
+      typeof f.reason!=='string'||!/^[a-z_]{1,80}$/.test(f.reason)||
+      !['lastCheckpointMs','lastSuccessfulReadMs','previousDeadlineMs','expectedEngine','observedEngine']
+        .every(k=>f[k]===null||integer(f[k])))throw Error('invalid_diagnostic_fault');
+  }
+  const g=d.maxSavedGap;
+  if(g!==null&&(!integer(g.fromMs)||!integer(g.toMs)||g.toMs<=g.fromMs||g.gapMs!==g.toMs-g.fromMs||
+    !integer(g.generation)||typeof g.sessionId!=='string'||g.sessionId.length>80||
+    !['previousCheckpointMs','previousSuccessfulReadMs'].every(k=>g[k]===null||integer(g[k]))||
+    !['same_session','normal_handoff','interrupted_handoff'].includes(g.context)))
+    throw Error('invalid_diagnostic_gap');
+  return d;
+}
+function fault(d,type,s,t,reason,extra={}){
+  if(!TYPES.includes(type))throw Error('invalid_diagnostic_type');
+  d.faultCounts[type]=(d.faultCounts[type]||0)+1;
+  d.faults.push({type,detectedMs:t,generation:s.generation,sessionId:s.sessionId,reason,
+    lastCheckpointMs:extra.lastCheckpointMs??s.updatedMs??null,
+    lastSuccessfulReadMs:s.lastSuccessfulReadMs??null,
+    previousDeadlineMs:extra.previousDeadlineMs??null,
+    expectedEngine:s.streamId??null,observedEngine:extra.observedEngine??null});
+  if(d.faults.length>LIMIT){d.faults.shift();d.faultsDropped++;}
+  validate(d);
+}
+function gap(d,s,fromMs,toMs,context,previousCheckpointMs){
+  if(fromMs===null||toMs<=fromMs||(d.maxSavedGap&&toMs-fromMs<=d.maxSavedGap.gapMs))return;
+  // Use successful-read end timestamps, not rounded speeds or invented zeroes.
+  // Across an interruption the first endpoint is a *saved* checkpoint; this is
+  // not proof the process/network was down for the whole interval.
+  d.maxSavedGap={fromMs,toMs,gapMs:toMs-fromMs,generation:s.generation,sessionId:s.sessionId,
+    context,previousCheckpointMs,previousSuccessfulReadMs:fromMs};
+  validate(d);
+}
+const normalReasons=new Set(['normal_yield','trial_complete','trial_complete_after_handoff',
+  'trial_complete_after_interruption','operator_stop','local_stop','no_target_within_wait_budget']);
+module.exports={LIMIT,fresh,validate,fault,gap,isFault:reason=>!normalReasons.has(reason)};
+
+};
+__factories["src/autonomous/rolling-budget"]=function(module,exports,require){
+'use strict';
+// Pure rolling ledger used by the continuous runtime allowance.
+// A reservation consumes capacity even if dispatch/reply is subsequently unknown.
+// The caller must persist and read back `next` under exclusive ownership BEFORE
+// dispatch. Never create a fresh ledger merely because a run/session changed.
+const WINDOW_MS=86400000,MAX_LIMIT=100;
+const integer=x=>Number.isSafeInteger(x)&&x>=0;
+const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&
+  Object.keys(x).sort().join()===keys.slice().sort().join();
+function validate(s){
+  if(!exact(s,['version','scope','limit','windowMs','observedMs','totalReserved','entries'])||s.version!==1||
+    typeof s.scope!=='string'||!/^[a-z0-9-]{8,80}$/.test(s.scope)||!integer(s.limit)||s.limit<1||s.limit>MAX_LIMIT||
+    s.windowMs!==WINDOW_MS||!integer(s.observedMs)||!integer(s.totalReserved)||
+    !Array.isArray(s.entries)||s.entries.length>s.limit||s.entries.length>s.totalReserved)
+    throw Error('invalid_rolling_budget');
+  let lastTime=null;
+  for(let i=0;i<s.entries.length;i++){
+    const e=s.entries[i];
+    if(!exact(e,['sequence','reservedMs'])||!integer(e.sequence)||
+      e.sequence!==s.totalReserved-s.entries.length+i+1||!integer(e.reservedMs)||
+      e.reservedMs>s.observedMs||(lastTime!==null&&e.reservedMs<lastTime))
+      throw Error('invalid_rolling_budget_entry');
+    lastTime=e.reservedMs;
+  }
+  return s;
+}
+function fresh(scope,now,limit=MAX_LIMIT){
+  return validate({version:1,scope,limit,windowMs:WINDOW_MS,observedMs:now,totalReserved:0,entries:[]});
+}
+function advance(s,now){
+  validate(s);
+  if(!integer(now)||now<s.observedMs)throw Error('rolling_budget_clock_rollback');
+  // The interval is (now - 24h, now]. An attempt releases its slot exactly when
+  // it reaches 24h, independently of local midnight or the current worker.
+  return {...s,observedMs:now,entries:s.entries.filter(e=>now-e.reservedMs<WINDOW_MS).map(e=>({...e}))};
+}
+function view(s,now){
+  const n=advance(s,now);
+  return {scope:n.scope,limit:n.limit,windowMs:n.windowMs,used:n.entries.length,remaining:n.limit-n.entries.length,
+    totalReserved:n.totalReserved,nextReleaseMs:n.entries.length?n.entries[0].reservedMs+n.windowMs:null};
+}
+function prepareReservation(s,now,expectedSequence){
+  const next=advance(s,now);
+  // A lost acknowledgement cannot turn a retried reservation into another slot.
+  if(!integer(expectedSequence)||expectedSequence!==next.totalReserved+1)
+    throw Error('rolling_budget_sequence_mismatch');
+  if(next.entries.length>=next.limit)return {allowed:false,next,reason:'rolling_budget_exhausted'};
+  next.totalReserved=expectedSequence;
+  const reservation={sequence:expectedSequence,reservedMs:now};next.entries.push(reservation);
+  validate(next);return {allowed:true,next,reservation,reason:'reserved_requires_durable_commit'};
+}
+module.exports={WINDOW_MS,MAX_LIMIT,fresh,validate,advance,view,prepareReservation};
+
+};
+__factories["src/autonomous/allowance"]=function(module,exports,require){
+'use strict';
+const rolling=require('./rolling-budget');
+const integer=x=>Number.isSafeInteger(x)&&x>=0;
+const copy=x=>JSON.parse(JSON.stringify(x));
+function grants(g){
+  if(!g||g.version!==1||!integer(g.sequence)||!Array.isArray(g.entries)||g.entries.length>8)throw Error('invalid_grants');
+  let last=0;
+  for(const x of g.entries){
+    if(!integer(x.sequence)||x.sequence<=last||x.sequence>g.sequence||!integer(x.count)||x.count<1||x.count>100||
+      !integer(x.issuedMs)||!integer(x.expiresMs)||x.expiresMs<=x.issuedMs||x.expiresMs-x.issuedMs>86400000||
+      typeof x.id!=='string'||!/^[a-f0-9]{32}$/.test(x.id))throw Error('invalid_grant');
+    last=x.sequence;
+  }
+  return g;
+}
+function fresh(scope,t){return {version:1,base:rolling.fresh(scope,t),totalReserved:0,grantSequence:0,uses:[]};}
+function validate(s){
+  if(!s||s.version!==1||!integer(s.totalReserved)||!integer(s.grantSequence)||!Array.isArray(s.uses)||s.uses.length>8)
+    throw Error('invalid_allowance');
+  rolling.validate(s.base);
+  if(s.totalReserved<s.base.totalReserved)throw Error('invalid_allowance_total');
+  let last=0;
+  for(const u of s.uses){
+    grants({version:1,sequence:s.grantSequence,entries:[u]});
+    if(u.sequence<=last||!integer(u.used)||u.used>u.count)throw Error('invalid_grant_usage');last=u.sequence;
+  }
+  return s;
+}
+function sync(s,g,t){
+  validate(s);grants(g);
+  if(g.sequence<s.grantSequence)throw Error('grant_ledger_rollback');
+  const next=copy(s);next.base=rolling.advance(s.base,t);
+  for(const u of s.uses){
+    const match=g.entries.find(x=>x.sequence===u.sequence);
+    if(t<u.expiresMs&&(!match||['id','count','issuedMs','expiresMs'].some(k=>match[k]!==u[k])))
+      throw Error('active_grant_changed');
+  }
+  next.uses=g.entries.filter(x=>t<x.expiresMs).map(x=>{
+    const old=s.uses.find(u=>u.sequence===x.sequence);
+    if(x.issuedMs>t||(!old&&x.sequence<=s.grantSequence))throw Error('unaccounted_grant');
+    return {...x,used:old?.used??0};
+  });next.grantSequence=g.sequence;return validate(next);
+}
+function view(s,t){
+  validate(s);const base=rolling.view(s.base,t),extra=s.uses.filter(u=>t<u.expiresMs);
+  return {base,extra:extra.map(u=>({...u,remaining:u.count-u.used})),
+    remaining:base.remaining+extra.reduce((n,u)=>n+u.count-u.used,0),totalReserved:s.totalReserved,
+    grantSequence:s.grantSequence};
+}
+function reserve(s,t){
+  const next=copy(validate(s));next.base=rolling.advance(s.base,t);const v=view(next,t);
+  if(!v.remaining)return {allowed:false,next};
+  let source;
+  if(v.base.remaining){const r=rolling.prepareReservation(next.base,t,next.base.totalReserved+1);next.base=r.next;source={kind:'base',sequence:r.reservation.sequence};}
+  else {const u=next.uses.filter(u=>t<u.expiresMs&&u.used<u.count).sort((a,b)=>a.expiresMs-b.expiresMs||a.sequence-b.sequence)[0];
+    u.used++;source={kind:'grant',id:u.id,sequence:u.sequence,used:u.used,expiresMs:u.expiresMs};}
+  next.totalReserved++;if(!integer(next.totalReserved))throw Error('allowance_counter_capacity');
+  return {allowed:true,next,source};
+}
+module.exports={fresh,validate,grants,sync,view,reserve};
+
+};
+__factories["src/autonomous/continuous"]=function(module,exports,require){
+'use strict';
+const owner=require('./ownership'),allowance=require('./allowance');
+const integer=x=>Number.isSafeInteger(x)&&x>=0;
+function validateBinding(b,validate){
+  if(typeof b.budgetScope!=='string'||!/^[a-z0-9-]{16,64}$/.test(b.budgetScope)||
+    !(b.durationMs===null||integer(b.durationMs)&&b.durationMs<=86400000)||
+    !(b.maxAttempts===null||integer(b.maxAttempts)&&b.maxAttempts<=100)||
+    (b.durationMs===null)!==(b.expiresMs===null)||b.mode==='diagnostic')throw Error('invalid_continuous_binding');
+  const normalized={...b,profile:'long-v1',durationMs:b.durationMs??86400000,
+    expiresMs:b.expiresMs??b.notBeforeMs+86400000,maxAttempts:b.maxAttempts??(b.mode==='observe'?0:100)};
+  delete normalized.budgetScope;delete normalized.engineRecovery;
+  if('engineRecovery' in b&&!['auto','pause'].includes(b.engineRecovery))throw Error('invalid_engine_recovery');
+  validate(normalized);return b;
+}
+function fresh(b,parent,t){
+  if(parent?.continuous){
+    const c=parent.continuous;
+    if(c.scope!==b.budgetScope||c.target!==b.host||c.device!==b.deviceName||
+      c.faultLocked||!parent.terminal)throw Error('continuous_budget_locked_or_scope_changed');
+    allowance.validate(c.allowance);
+    return {...JSON.parse(JSON.stringify(c)),actionsDropped:0,actionGcThrough:0,inheritedActionAt:parent.pipeline.own.actionAt,runBaseTotal:c.allowance.totalReserved};
+  }
+  return {version:1,scope:b.budgetScope,target:b.host,device:b.deviceName,
+    allowance:allowance.fresh(b.budgetScope,t),runBaseTotal:0,actionsDropped:0,
+    actionGcThrough:0,inheritedActionAt:null,ownerGcThrough:parent?.generation??-1,faultLocked:false};
+}
+function validateState(c,b){
+  if(!c||c.version!==1||c.scope!==b.budgetScope||c.target!==b.host||c.device!==b.deviceName||
+    typeof c.faultLocked!=='boolean'||!['runBaseTotal','actionsDropped','actionGcThrough'].every(k=>integer(c[k]))||
+    !(c.ownerGcThrough===-1||integer(c.ownerGcThrough))||c.actionGcThrough>c.actionsDropped||
+    !(c.inheritedActionAt===null||Number.isFinite(c.inheritedActionAt)&&c.inheritedActionAt>=0)||
+    c.allowance?.base?.scope!==c.scope)throw Error('invalid_continuous_ledger');
+  allowance.validate(c.allowance);return c;
+}
+function pruneActions(s){
+  while(s.actions.length>100){const a=s.actions[0];
+    if(a.status!=='reply_received_effect_unverified'||a.startedMs===null||s.updatedMs-a.startedMs<5000)throw Error('cannot_retire_open_action');
+    s.actions.shift();s.continuous.actionsDropped++;
+  }
+}
+function gc(s,store,owned){
+  const c=s.continuous;
+  const del=k=>{if(store.read(owner.HEAD)!==owned)throw Error('retention_head_changed');
+    if(store.read(k)!==null&&(store.write(k,null)!==true||store.read(k)!==null))throw Error('retention_delete_failed');};
+  // The already-committed index no longer references these pages.
+  while(c.actionGcThrough<c.actionsDropped){del(owner.pageKey(s.runId,c.actionGcThrough+1));c.actionGcThrough++;}
+  while(c.ownerGcThrough<s.generation-2){
+    const g=c.ownerGcThrough+1,raw=store.read(owner.key(g,'state'));
+    // Retain earlier completed runs for the control-plane export retention.
+    if(raw!==null){const old=owner.parse(raw);
+      if(old.runId!==s.runId){c.ownerGcThrough=g;continue;}
+      if(!old.closed&&!(integer(old.sessionDeadlineMs)&&s.sessionStartedMs>=old.sessionDeadlineMs))throw Error('cannot_retire_live_owner');
+    }
+    for(const suffix of ['state','race','door'])del(owner.key(g,suffix));c.ownerGcThrough=g;
+  }
+}
+module.exports={validateState,validateBinding,fresh,pruneActions,gc};
+
+};
 __factories["src/autonomous/runtime"]=function(module,exports,require){
 'use strict';
 const {Pipeline,fingerprint}=require('../pipeline');
@@ -1224,6 +1468,8 @@ const {byteLength}=require('../core/runner');
 const ownership=require('./ownership');
 const snapshots=require('./snapshot');
 const evidence=require('./long-evidence');
+const diagnostics=require('./diagnostics');
+const continuous=require('./continuous'),allowance=require('./allowance');
 const {explain}=require('../policy/decision-evidence');
 const schedule=require('./schedule');
 const PERIOD=schedule.periodMs,RESERVE=schedule.reserveMs,MAX_STATE=524288;
@@ -1231,6 +1477,7 @@ const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const copy=x=>JSON.parse(JSON.stringify(x));
 function validate(b){
+  if(b?.profile==='continuous-v1')return continuous.validateBinding(b,validate);
   const keys=['enabled','runId','mode','host','deviceName','expectedBuild','expectedModel','notBeforeMs',
     'latestStartMs','expiresMs','durationMs','referenceMs','tailMs','maxAttempts','diagnostic'];
   if(b&&Object.prototype.hasOwnProperty.call(b,'waitTargetMs'))keys.push('waitTargetMs');
@@ -1263,15 +1510,20 @@ function compact(f){const p=f.point;return [Math.round(f.time_s*1000),f.read_ms,
   p.short_rate_Bps,p.main_delta_bytes,p.state,p.protected,f.startup.remaining_s,f.rearm.window_remaining_s,
   f.targets.map(r=>[r.id,r.inBytes])];}
 function validateHandoff(s,b){
+  if(s.diagnostics)diagnostics.validate(s.diagnostics);
+  const cont=b.profile==='continuous-v1';
+  if(cont){continuous.validateState(s.continuous,b);
+    if(s.continuous.ownerGcThrough>s.generation)throw Error('invalid_retention_cursor');
+    if(s.continuous.allowance.totalReserved-s.continuous.runBaseTotal!==s.attemptsReserved)throw Error('allowance_action_mismatch');}
   if(s.version!==1||!['samples','candidates','eligible','attemptsReserved','invocations','sessions'].every(k=>integer(s[k]))||
-    s.attemptsReserved>b.maxAttempts||s.invocations>s.attemptsReserved||!Array.isArray(s.actions)||
-    s.actions.length!==s.attemptsReserved||!Array.isArray(s.recent)||s.recent.length>64||
+    (b.maxAttempts!==null&&s.attemptsReserved>b.maxAttempts)||s.invocations>s.attemptsReserved||!Array.isArray(s.actions)||
+    s.actions.length+(cont?s.continuous.actionsDropped:0)!==s.attemptsReserved||!Array.isArray(s.recent)||s.recent.length>64||
     !Array.isArray(s.events)||s.events.length>96||!Array.isArray(s.sessionHistory)||
     s.sessionHistory.length+(s.sessionHistoryDropped||0)!==s.sessions||
     !integer(s.runStartedMs)||!integer(s.updatedMs)||s.updatedMs<s.runStartedMs||
     !(s.originMs===null||integer(s.originMs))||!(s.actionsDisabled===null||s.actionsDisabled==='operator_observe'))
     throw Error('invalid_handoff_ledger');
-  if(b.profile==='long-v1'){
+  if(b.profile==='long-v1'||cont){
     evidence.validate(s.longEvidence);
     if(!s.pipeline.review||!integer(s.sessionHistoryDropped)||s.sessionHistory.length>16)
       throw Error('invalid_long_handoff');
@@ -1279,23 +1531,23 @@ function validateHandoff(s,b){
   let last=null;
   for(let i=0;i<s.actions.length;i++){
     const a=s.actions[i];
-    if(a.sequence!==i+1||!integer(a.startedMs)||!integer(a.completedMs)||a.completedMs<a.startedMs||
+    if(a.sequence!==i+1+(cont?s.continuous.actionsDropped:0)||!integer(a.startedMs)||!integer(a.completedMs)||a.completedMs<a.startedMs||
       a.completedMs>s.updatedMs||a.status!=='reply_received_effect_unverified'||
       (last!==null&&a.startedMs-last<5000))throw Error('unsafe_handoff_action');
     last=a.startedMs;
   }
-  if(s.invocations!==s.actions.length||s.pipeline?.own?.actionAt!==(last===null?null:last/1000))
+  if(s.invocations!==s.actions.length+(cont?s.continuous.actionsDropped:0)||s.pipeline?.own?.actionAt!==(last===null?(cont?s.continuous.inheritedActionAt:null):last/1000))
     throw Error('handoff_action_clock_mismatch');
-  if(b.profile==='long-v1'){
+  if(b.profile==='long-v1'||cont){
     const r=s.pipeline.review,a=s.actions.at(-1);
-    if(r.actionAt!==(last===null?null:last/1000)||
+    if(r.actionAt!==(last===null?(cont?s.continuous.inheritedActionAt:null):last/1000)||
       (a&&(r.old!==fingerprint(a.connection)||
         (a.decision.reason==='stalled_own_successor'&&!r.resumed&&r.rescues!==1))))
       throw Error('handoff_recovery_ledger_mismatch');
   }
 }
 function start(o){
-  const b=o.binding;let ended=false,owned=null,state=null,pipeline=null,pending=null,token=0,lastClock=null;
+  const b=o.binding,cont=b?.profile==='continuous-v1';let ended=false,owned=null,state=null,pipeline=null,pending=null,token=0,lastClock=null;
   const done=(reason,extra={})=>o.done({reason,...extra});
   if(!b||b.enabled!==true){done('disabled');return;}
   validate(b);
@@ -1305,11 +1557,16 @@ function start(o){
   const flags={stop:ownership.PREFIX+'-'+b.runId+'-stop',observe:ownership.PREFIX+'-'+b.runId+'-observe'};
   function now(){const t=o.now();if(!integer(t)||(lastClock!==null&&t<lastClock))throw Error('clock_discontinuity');
     lastClock=t;return t;}
+  const expiry=b.expiresMs??Number.MAX_SAFE_INTEGER,cap=b.maxAttempts??Number.MAX_SAFE_INTEGER;
   const begin=now();if(begin<b.notBeforeMs){done('outside_run_window');return;}
   const parent=ownership.head(store),same=parent.state?.runId===b.runId;
+  if(parent.state?.continuous&&!cont){done('continuous_budget_requires_scoped_task');return;}
+  if(cont&&typeof o.readGrants!=='function')throw Error('continuous_service_required');
+  const budgetMarker=ownership.PREFIX+'-continuous-scope';
+  if(cont&&!parent.state?.continuous&&store.read(budgetMarker)!==null)throw Error('continuous_budget_missing');
   const recovering=!!(same&&!parent.state.closed&&Number.isSafeInteger(parent.state.sessionDeadlineMs)&&
     begin>=parent.state.sessionDeadlineMs+schedule.takeoverGraceMs);
-  if(begin>=b.expiresMs&&!recovering&&!(same&&parent.state.closed&&!parent.state.terminal)){done('outside_run_window');return;}
+  if(begin>=expiry&&!recovering&&!(same&&parent.state.closed&&!parent.state.terminal)){done('outside_run_window');return;}
   const runKey=ownership.PREFIX+'-'+b.runId+'-root';
   if(!same&&store.read(runKey)!==null){done('run_cannot_be_reused');return;}
   if(same&&(parent.state.binding!==binding||parent.state.codeId!==o.codeId)){done('configuration_changed');return;}
@@ -1328,23 +1585,37 @@ function start(o){
     if(ps.longEvidence&&ps.sessionHistory.length>16){ps.sessionHistory.shift();ps.sessionHistoryDropped++;}
   }
   if(same){
-    if(parent.state.sessions>=(b.profile==='long-v1'?Math.ceil(b.durationMs/PERIOD)+2:16)||begin<parent.state.updatedMs){done('handoff_limit_or_clock');return;}
+    if(parent.state.sessions>=(cont?Number.MAX_SAFE_INTEGER:b.profile==='long-v1'?Math.ceil(b.durationMs/PERIOD)+2:16)||begin<parent.state.updatedMs){done('handoff_limit_or_clock');return;}
     if(!recoveryBlocked)validateHandoff(parent.state,b);
     pipeline=snapshots.restore(parent.state.pipeline);
-  }else pipeline=new Pipeline(b.profile??null);
-  const sessionStart=begin,sessionDeadline=Math.min(b.expiresMs,Math.floor(begin/PERIOD)*PERIOD+PERIOD-RESERVE);
-  if(begin<b.expiresMs&&!recovering&&sessionDeadline-begin<1000){done('insufficient_session_budget');return;}
+  }else pipeline=cont&&parent.state?.continuous?snapshots.restore(parent.state.pipeline):new Pipeline(b.profile??null);
+  const sessionStart=begin,sessionDeadline=Math.min(expiry,Math.floor(begin/PERIOD)*PERIOD+PERIOD-RESERVE);
+  // A final sub-second slice needs only a metadata closure, not another read.
+  // Keep the old refusal for a short *non-final* cron slice.
+  const finalShortSlice=same&&(b.profile==='long-v1'||cont)&&expiry>=begin&&
+    expiry-begin<1000&&expiry-sessionDeadline<=RESERVE;
+  if(begin<expiry&&!recovering&&sessionDeadline-begin<1000&&!finalShortSlice){done('insufficient_session_budget');return;}
   const claim=ownership.begin(store,parent,b.runId,o.sessionId,o.codeId,h=>{
+    if(cont&&!parent.state?.continuous){
+      const marker=JSON.stringify({scope:b.budgetScope,host:b.host,device:b.deviceName});
+      if(store.read(budgetMarker)!==null||store.write(budgetMarker,marker)!==true||store.read(budgetMarker)!==marker)
+        throw Error('continuous_bootstrap_unconfirmed');
+    }
     if(!same){
       if(store.read(runKey)!==null||store.write(runKey,JSON.stringify(h))!==true)
         throw Error('run_root_write_failed');
     }
     const fresh={version:1,binding,runStartedMs:begin,originMs:null,sessions:0,sessionHistory:[],samples:0,
       candidates:0,eligible:0,attemptsReserved:0,invocations:0,actions:[],events:[],recent:[],gateReasons:{},
-      states:{},maxReadMs:0,maxIntervalMs:0,lastSampleMs:null,streamId:null,actionsDisabled:null,
-      lastSuccessfulReadMs:null,readFailures:0,readErrors:0,recoveries:0,lastFault:null};
-    if(b.profile==='long-v1')Object.assign(fresh,{originMs:begin,sessionHistoryDropped:0,longEvidence:evidence.fresh()});
+      states:{},maxReadMs:0,maxIntervalMs:0,lastSampleMs:null,streamId:cont?parent.state?.streamId??null:null,actionsDisabled:null,
+      lastSuccessfulReadMs:null,readFailures:0,readErrors:0,recoveries:0,lastFault:null,
+      diagnostics:diagnostics.fresh()};
+    if(b.profile==='long-v1'||cont)Object.assign(fresh,{originMs:begin,sessionHistoryDropped:0,longEvidence:evidence.fresh()});
+    if(cont)fresh.continuous=same?null:continuous.fresh(b,parent.state,begin);
     const s=same?copy(parent.state):fresh;
+    if(!s.diagnostics)s.diagnostics=diagnostics.fresh();
+    if(recovering)diagnostics.fault(s.diagnostics,'session_interrupted',s,begin,'interrupted_session',
+      {previousDeadlineMs:s.sessionDeadlineMs});
     return {...s,...h,closed:false,terminal:false,reason:null,updatedMs:begin,sessionStartedMs:begin,
       sessionDeadlineMs:sessionDeadline,recoveries:(s.recoveries||0)+(recovering?1:0),
       lastFault:recovering?'interrupted_session':s.lastFault,sessions:s.sessions+1,phase:'starting',pipeline:snapshots.capture(pipeline)};
@@ -1354,15 +1625,19 @@ function start(o){
   if(state.longEvidence)state.longEvidence.generations.push(state.generation);
   const encode=ownership.writer(store);
   let nextCheckpoint=begin+schedule.checkpointMs,signalCheck=null,cachedStop=null,cachedObserve=null,lastFrame=null;
+  let observedEngine=null,lastPersistedMs=begin,grantCheck=null;
   function event(type,fields={}){state.events.push({atMs:now(),type,...fields});if(state.events.length>96)state.events.shift();}
   function signals(force=false){
     const t=now();if(force||signalCheck===null||t-signalCheck>=1000){
-      cachedStop=store.read(flags.stop);cachedObserve=store.read(flags.observe);signalCheck=t;}
+      cachedStop=store.read(flags.stop);cachedObserve=store.read(flags.observe);signalCheck=t;
+      if(cont&&(grantCheck===null||t-grantCheck>=1000)){
+        state.continuous.allowance=allowance.sync(state.continuous.allowance,o.readGrants(),t);grantCheck=t;}}
     if(cachedObserve!==null)state.actionsDisabled='operator_observe';
     return cachedStop!==null;
   }
   function persist(){
     if(store.read(ownership.HEAD)!==owned)throw Error('ownership_changed');
+    if(cont)continuous.pruneActions(state);
     state.pipeline=snapshots.capture(pipeline);state.updatedMs=now();
     if(state.longEvidence){
       for(const a of state.actions)if(!a.__sealedExcerpt)evidence.boundAction(a);
@@ -1371,6 +1646,7 @@ function start(o){
     const raw=encode(state);if(byteLength(raw)>MAX_STATE)throw Error('evidence_capacity');
     const k=ownership.key(state.generation,'state');
     if(store.write(k,raw)!==true||store.read(k)!==raw)throw Error('state_write_failed');
+    lastPersistedMs=state.updatedMs;
   }
   function finish(reason,handoff=false){
     if(ended)return;ended=true;token++;pending=null;
@@ -1378,7 +1654,16 @@ function start(o){
     state.endedMs=o.now();state.sessionHistory.push({sessionId:o.sessionId,start:sessionStart,end:state.endedMs,reason});
     if(state.longEvidence&&state.sessionHistory.length>16){state.sessionHistory.shift();state.sessionHistoryDropped++;}
     state.events.push({atMs:state.endedMs,type:'session_closed',reason});if(state.events.length>96)state.events.shift();let saved=false;
-    try{persist();if(state.longEvidence){evidence.retire(state,store,owned,handoff?2:1);persist();}saved=true;}
+    try{
+      if(diagnostics.isFault(reason)){
+        if(cont)state.continuous.faultLocked=true;
+        state.lastFault=reason;
+        diagnostics.fault(state.diagnostics,'terminal_fault',state,state.endedMs,reason,
+          {lastCheckpointMs:lastPersistedMs,observedEngine});
+      }
+      persist();if(cont){continuous.gc(state,store,owned);persist();}
+      else if(state.longEvidence){evidence.retire(state,store,owned,handoff?2:1);persist();}saved=true;
+    }
     catch(_){/* Incomplete ownership remains blocked. Never reset the splitter. */}
     done(reason,{saved,closed:true,terminal:state.terminal,samples:state.samples,invocations:state.invocations});
   }
@@ -1387,17 +1672,18 @@ function start(o){
   function yieldOrFinish(){
     // A wall-clock deadline can coincide with a cron boundary. Close in the
     // final 300 ms reserve instead of leaving a handoff nobody may resume.
-    const final=b.profile==='long-v1'&&b.expiresMs-sessionDeadline<=RESERVE;
+    const final=(b.profile==='long-v1'||cont)&&expiry-sessionDeadline<=RESERVE;
     finish(final?'trial_complete':'normal_yield',!final);
   }
   function phase(t){
     if(state.originMs===null)return 'awaiting_download';
-    const elapsed=t-state.originMs;return elapsed<b.referenceMs?'reference':elapsed<b.durationMs-b.tailMs?'actions':
-      elapsed<b.durationMs?'tail':'ended';
+    const elapsed=t-state.originMs;return elapsed<b.referenceMs?'reference':elapsed<(b.durationMs??Number.MAX_SAFE_INTEGER)-b.tailMs?'actions':
+      elapsed<(b.durationMs??Number.MAX_SAFE_INTEGER)?'tail':'ended';
   }
   function mayAct(t,reserved=false){const stopped=signals(true);return !stopped&&!ended&&o.capabilities?.actionsQualified===true&&b.mode!=='observe'&&
-    !state.actionsDisabled&&(reserved?state.attemptsReserved<=b.maxAttempts:state.attemptsReserved<b.maxAttempts)&&phase(t)==='actions'&&
-    t<b.expiresMs&&t<sessionDeadline&&store.read(ownership.HEAD)===owned;}
+    !state.actionsDisabled&&(reserved?state.attemptsReserved<=cap:state.attemptsReserved<cap)&&
+    (!cont||(!state.continuous.faultLocked&&(reserved||allowance.view(state.continuous.allowance,t).remaining>0)))&&phase(t)==='actions'&&
+    t<expiry&&t<sessionDeadline&&store.read(ownership.HEAD)===owned;}
   function record(f){
     const row=compact(f);state.recent.push(row);if(state.recent.length>64)state.recent.shift();
     const a=state.actions.at(-1),replacement=pipeline.replacement;
@@ -1429,9 +1715,11 @@ function start(o){
       decision:{point:f.point,startup:f.startup,rearm:f.rearm,reason:d.reason,
         explanation:explain(pipeline,f,d,first)},before:before.slice(-33),
       followup:[],followupEndMs:null,effectConfirmedMs:null,firstThresholdMs:null,successors:[]};
+    if(cont){const reservation=allowance.reserve(state.continuous.allowance,now());
+      if(!reservation.allowed)return false;state.continuous.allowance=reservation.next;a.allowance=reservation.source;}
     state.actions.push(a);state.attemptsReserved++;event('action_reserved',{sequence:a.sequence});persist();
     let t=now();const allowed=mayAct(t,true);t=now();
-    if(!allowed||t>=sessionDeadline||t>=b.expiresMs||t-f.received_ms<0||t-f.received_ms>250){finish('reserved_dispatch_cancelled');return true;}
+    if(!allowed||(a.allowance?.kind==='grant'&&t>=a.allowance.expiresMs)||t>=sessionDeadline||t>=expiry||t-f.received_ms<0||t-f.received_ms>250){finish('reserved_dispatch_cancelled');return true;}
     const prev=state.actions.at(-2);if(prev)prev.followupEndMs=t;
     a.startedMs=t;state.invocations++;pipeline.afterAction(a,t);pending=null;
     const generation=++token;let replied=false;
@@ -1446,6 +1734,7 @@ function start(o){
   function readFailure(reason){
     pending=null;state.readFailures=(state.readFailures||0)+1;state.readErrors=(state.readErrors||0)+1;
     state.lastFault=reason;event('read_failed',{reason,consecutive:state.readFailures});
+    diagnostics.fault(state.diagnostics,'read_failure',state,now(),reason,{lastCheckpointMs:lastPersistedMs});
     // Every retry occurs after a genuine >0.5 s gap. Existing ingest quarantine
     // rebuilds the speed baseline; own-action clocks and rescue budget survive.
     if(state.readFailures>schedule.readRetryMs.length){finish('read_retry_exhausted');return;}
@@ -1454,23 +1743,39 @@ function start(o){
   function tick(){
     const t=now();if(store.read(ownership.HEAD)!==owned){finish('ownership_changed');return;}
     if(signals()){finish('operator_stop');return;}
-    if(t>=b.expiresMs||phase(t)==='ended'){finish('trial_complete');return;}
+    if(t>=expiry||phase(t)==='ended'){finish('trial_complete');return;}
     if(state.originMs===null&&t-state.runStartedMs>=(b.waitTargetMs??120000)){finish('no_target_within_wait_budget');return;}
     if(t>=sessionDeadline){yieldOrFinish();return;}
     const generation=++token;let replied=false;
     later(()=>{if(!replied&&generation===token){replied=true;token++;readFailure('read_timeout');}},schedule.readTimeoutMs);
     try{o.api('GET','/v1/requests/active',null,payload=>guard(()=>{
       if(replied||generation!==token)return;replied=true;const end=now();
-      if(end>=b.expiresMs||phase(end)==='ended'){finish('trial_complete');return;}
+      if(end>=expiry||phase(end)==='ended'){finish('trial_complete');return;}
       if(end>=sessionDeadline){yieldOrFinish();return;}
       if(!payload||!Array.isArray(payload.requests)){readFailure('invalid_requests_shape');return;}
-      state.readFailures=0;state.lastSuccessfulReadMs=end;
+      state.readFailures=0;
       const relevant=payload.requests.filter(r=>{const dest=endpoint(r.URL);return dest&&dest.host===b.host&&dest.port===443&&
         r.local===true&&r.deviceName===b.deviceName&&r.completed===false&&r.failed===false;});
       if(relevant.some(r=>!['TCP','HTTPS'].includes(r.method)))throw Error('unexpected_target_transport');
       if(state.streamId===null&&relevant.length){const ids=new Set(relevant.map(r=>r.engineIdentifier));
         if(ids.size!==1||![...ids].every(integer))throw Error('ambiguous_stream_identity');state.streamId=[...ids][0];}
+      const engineIds=new Set(relevant.map(r=>r.engineIdentifier));
+      observedEngine=engineIds.size===1&&integer([...engineIds][0])?[...engineIds][0]:null;
+      if(cont&&b.engineRecovery==='auto'&&observedEngine!==null&&state.streamId!==null&&observedEngine!==state.streamId){
+        diagnostics.fault(state.diagnostics,'engine_rebaseline',state,end,'engine_changed_rebaseline',
+          {observedEngine,lastCheckpointMs:lastPersistedMs});
+        const old=pipeline,ownPending=old.own.actionAt!==null&&end/1000-old.own.actionAt<5;
+        pipeline=new Pipeline('continuous-v1');Object.assign(pipeline.own,old.own);
+        pipeline.review.s={...old.review.s,disarmed:'successor_lost_or_ambiguous',successor:null,previous:null,
+          quietAt:null,fast:null,hadTarget:ownPending,emptyAt:null,emptyLast:null,entryAt:null};
+        if(ownPending)pipeline.startup.afterAction(old.own.actionAt);
+        state.streamId=observedEngine;pending=null;
+      }
       const f=pipeline.ingest(payload,t,end,state.streamId===null?undefined:state.streamId);lastFrame=f;
+      diagnostics.gap(state.diagnostics,state,state.lastSuccessfulReadMs??null,end,
+        state.samples===(same?parent.state.samples:0)?(recovering?'interrupted_handoff':same?'normal_handoff':'same_session'):'same_session',
+        state.samples===(same?parent.state.samples:0)&&same?parent.state.updatedMs:lastPersistedMs);
+      state.lastSuccessfulReadMs=end;
       state.samples++;state.maxReadMs=Math.max(state.maxReadMs,f.read_ms);
       if(state.lastSampleMs!==null)state.maxIntervalMs=Math.max(state.maxIntervalMs,f.time_s*1000-state.lastSampleMs);
       state.lastSampleMs=f.time_s*1000;state.states[f.point.state]=(state.states[f.point.state]||0)+1;
@@ -1496,9 +1801,11 @@ function start(o){
     }));}catch(_){if(!replied&&generation===token){replied=true;token++;readFailure('read_exception');}}
   }
   guard(()=>{if(recoveryBlocked){finish('interrupted_action_unknown');return;}
-    if(begin>=b.expiresMs){finish('trial_complete_after_interruption');return;}
+    if(begin>=expiry){finish(recovering?'trial_complete_after_interruption':'trial_complete_after_handoff');return;}
+    if(finalShortSlice){later(yieldOrFinish,sessionDeadline-now());return;}
     event('session_started',{generation:state.generation});persist();
-    if(state.longEvidence){evidence.retire(state,store,owned);persist();}tick();});
+    if(cont){state.longEvidence.generations=state.longEvidence.generations.slice(-2);continuous.gc(state,store,owned);persist();}
+    else if(state.longEvidence){evidence.retire(state,store,owned);persist();}tick();});
   return {inspect:()=>copy(state),lastFrame:()=>lastFrame,stop:()=>finish('local_stop')};
 }
 module.exports={start,validate,validateHandoff,compact,PERIOD,RESERVE};
@@ -1509,6 +1816,7 @@ __factories["src/autonomous/jobs"]=function(module,exports,require){
 'use strict';
 const owner=require('./ownership');
 const schedule=require('./schedule');
+const allowance=require('./allowance');
 const PERIOD=schedule.periodMs;
 const copy=x=>JSON.parse(JSON.stringify(x));
 const canonical=x=>x===null||typeof x!=='object'?JSON.stringify(x):Array.isArray(x)?
@@ -1517,8 +1825,10 @@ const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const id=x=>typeof x==='string'&&/^[a-z0-9-]{16,64}$/.test(x);
 function validateService(s){
-  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':''))||
-    ('layout' in s&&!['single-worker-v1','diagnostic-pair-v1'].includes(s.layout))||s.protocol!==2||!id(s.installationId)||
+  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':'')+(s&&'budgetScope' in s?',budgetScope':'')+(s&&'engineRecovery' in s?',engineRecovery':''))||
+    ('layout' in s&&!['single-worker-v1','diagnostic-pair-v1'].includes(s.layout))||
+    ('budgetScope' in s&&(!id(s.budgetScope)||s.layout!=='single-worker-v1'))||
+    ('engineRecovery' in s&&(!s.budgetScope||!['auto','pause'].includes(s.engineRecovery)))||s.protocol!==2||!id(s.installationId)||
     typeof s.host!=='string'||s.host.length>253||!s.host.includes('.')||
     !s.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
     typeof s.deviceName!=='string'||!s.deviceName.length||s.deviceName.length>64||
@@ -1527,6 +1837,13 @@ function validateService(s){
   return s;
 }
 function validateTask(t){
+  if(t?.profile==='continuous-v1'){
+    if(!integer(t.sequence)||t.sequence<1||Number(/-(\d+)$/.exec(t.runId)?.[1])!==t.sequence||t.kind==='probe'||
+      !(t.durationMs===null||integer(t.durationMs)&&t.durationMs<=86400000)||
+      (t.kind==='execute'&&!(t.maxAttempts===null||integer(t.maxAttempts)&&t.maxAttempts<=100)))throw Error('invalid_continuous_task');
+    const n={...t,profile:'long-v1',durationMs:t.durationMs??86400000};delete n.sequence;
+    if(t.kind==='execute')n.maxAttempts=t.maxAttempts??100;validateTask(n);return t;
+  }
   const active=t?.kind==='execute';
   const extended=t?.profile==='long-v1';
   const keys='runId,kind,delayMs,startGraceMs,waitTargetMs,durationMs'+(active?',maxAttempts,referenceMs,tailMs':'')+
@@ -1545,14 +1862,21 @@ function validateTask(t){
   return t;
 }
 function bindingFor(s,t,now){
-  const end=now+t.waitTargetMs+t.durationMs;
+  const end=t.durationMs===null?null:now+t.waitTargetMs+t.durationMs;
   return {enabled:true,runId:t.runId,mode:t.kind==='execute'?'execute':'observe',host:s.host,deviceName:s.deviceName,
-    ...(t.profile?{profile:t.profile}:{}),
+    ...(t.profile?{profile:t.profile}:{}),...(t.profile==='continuous-v1'?{budgetScope:s.budgetScope,...(s.engineRecovery?{engineRecovery:s.engineRecovery}:{})}:{}),
     expectedBuild:s.expectedBuild,expectedModel:s.expectedModel,notBeforeMs:now,
-    latestStartMs:Math.min(now+PERIOD,end-1),expiresMs:end,durationMs:t.durationMs,
-    waitTargetMs:t.waitTargetMs,referenceMs:t.referenceMs??0,tailMs:t.tailMs??0,maxAttempts:t.maxAttempts??0,diagnostic:null};
+    latestStartMs:Math.min(now+PERIOD,end===null?Number.MAX_SAFE_INTEGER:end-1),expiresMs:end,durationMs:t.durationMs,
+    waitTargetMs:t.waitTargetMs,referenceMs:t.referenceMs??0,tailMs:t.tailMs??0,maxAttempts:t.kind==='execute'?t.maxAttempts:0,diagnostic:null};
 }
 function validateLedger(state,s){
+  if(s.budgetScope){allowance.grants(state.grants);if(!integer(state.runSequence))throw Error('invalid_run_sequence');}
+  if(state.retireJob){const j=state.retireJob;
+    if(!exact(j,'runId,resultKey,generation,fromAction,toAction')||!id(j.runId)||
+      !integer(j.fromAction)||!integer(j.toAction)||j.fromAction<1||j.toAction-j.fromAction>123||
+      (j.resultKey===null?j.generation!==null:!integer(j.generation)||j.resultKey!==owner.key(j.generation,'state')))
+      throw Error('invalid_retirement_record');
+  }
   if(!Array.isArray(state.history)||state.history.length>16)throw Error('invalid_job_ledger');
   const records=[state.current,...state.history].filter(x=>x!==null),ids=new Set();
   for(const j of records){
@@ -1573,7 +1897,7 @@ function validateLedger(state,s){
 function context(s,o){
   validateService(s);
   if(!/^[a-f0-9]{64}$/.test(o.codeId)||!ownerIdentity(o.sessionId)||!integer(o.now()))throw Error('invalid_job_context');
-  const prefix='vidhub-jobs-v2-'+s.installationId;
+  const prefix='vidhub-jobs-v2-'+(s.budgetScope||s.installationId);
   // Separate one-shot generations serialize control/admission across JSCs. No
   // expiring lock, blanket reset or automatic reuse of an interrupted claim.
   const map=k=>prefix+k.slice(owner.PREFIX.length);
@@ -1582,16 +1906,40 @@ function context(s,o){
   const put=(k,v)=>{if(o.write(v,k)!==true||o.read(k)!==v)throw Error('job_write_unconfirmed');};
   function head(){
     const h=owner.head(store);
-    if(h.state&&(h.state.codeId!==o.codeId||h.state.service!==canonical(s)||!integer(h.state.clockMs)||
+    const previous=h.state?JSON.parse(h.state.service):null;
+    const upgrade=!!(s.budgetScope&&previous?.budgetScope===s.budgetScope&&
+      canonical({...previous,installationId:s.installationId})===canonical(s)&&
+      (!h.state.current||['finished','cancelled','expired'].includes(h.state.current.phase)));
+    if(h.state&&((!upgrade&&(h.state.codeId!==o.codeId||h.state.service!==canonical(s)))||!integer(h.state.clockMs)||
       o.now()<h.state.clockMs))throw Error('job_service_or_clock_changed');
     if(h.state)validateLedger(h.state,s);
     return h;
   }
+  function cleanup(h){
+    const j=h.state?.retireJob;if(!j)return;
+    const del=k=>{if(store.read(owner.HEAD)!==h.raw)throw Error('control_retention_head_changed');
+      if(o.read(k)!==null&&(o.write(null,k)!==true||o.read(k)!==null))throw Error('control_retention_failed');};
+    if(j.resultKey){const raw=o.read(j.resultKey);
+      if(raw!==null){const old=owner.parse(raw);
+        if(old.runId!==j.runId||!old.terminal||!old.closed)throw Error('retired_job_mismatch');
+        if(owner.head({read:o.read},false).state?.generation===old.generation)throw Error('cannot_retire_current_head');
+      }
+      for(let i=j.fromAction;i<=j.toAction;i++)del(owner.pageKey(j.runId,i));
+      for(let g=Math.max(0,j.generation-2);g<=j.generation;g++){
+        const raw=o.read(owner.key(g,'state'));
+        if(raw!==null&&owner.parse(raw).runId!==j.runId)continue;
+        for(const suffix of ['state','race','door'])del(owner.key(g,suffix));
+      }
+    }
+    for(const suffix of ['spec','cancel'])del(key(j.runId,suffix));
+    for(const suffix of ['root','stop','observe'])del(owner.PREFIX+'-'+j.runId+'-'+suffix);
+  }
   function transaction(fn){
-    const h=head(),state=h.state?copy(h.state):{current:null,history:[]};
+    const h=head();if(s.budgetScope)cleanup(h);
+    const state=h.state?copy(h.state):{current:null,history:[],...(s.budgetScope?{runSequence:0,grants:{version:1,sequence:0,entries:[]}}:{})};
     const next=fn(state); // All validation before consuming a one-shot claim.
     const claimed=owner.begin(store,h,s.installationId,o.sessionId,o.codeId,header=>({
-      ...header,closed:true,terminal:true,service:canonical(s),clockMs:o.now(),current:next.current,history:next.history}));
+      ...header,closed:true,terminal:true,service:canonical(s),clockMs:o.now(),current:next.current,history:next.history,...(s.budgetScope?{runSequence:next.runSequence,grants:next.grants,retireJob:next.retireJob??null}:{})}));
     if(!claimed.accepted)throw Error('job_control_busy');
     if(next.current?.task.profile==='long-v1'&&claimed.state.generation>=2){
       const k=owner.key(claimed.state.generation-2,'state'),raw=store.read(k);
@@ -1604,22 +1952,32 @@ function context(s,o){
           throw Error('control_retention_failed');
       }
     }
+    if(s.budgetScope&&claimed.state.generation>=2){
+      for(const suffix of ['state','race','door']){const k=owner.key(claimed.state.generation-2,suffix);
+        if(store.read(owner.HEAD)!==claimed.header||store.write(k,null)!==true||store.read(k)!==null)throw Error('control_retention_failed');}
+    }
+    if(s.budgetScope)cleanup({raw:claimed.header,state:claimed.state});
     return claimed.state;
   }
-  return {head,transaction,key,put};
+  let cachedHeader=null,cachedGrants=null;
+  function readGrants(){const revision=store.read(owner.HEAD);
+    if(revision!==cachedHeader||cachedGrants===null){const h=head();cachedHeader=h.raw;cachedGrants=h.state?.grants;allowance.grants(cachedGrants);}
+    return cachedGrants;
+  }
+  return {head,transaction,key,put,readGrants};
 }
 function ownerIdentity(x){return typeof x==='string'&&/^[A-Za-z0-9-]{1,80}$/.test(x);}
 function stopKey(run){return owner.PREFIX+'-'+run+'-stop';}
 function runtimeState(o,j,details=true){
   if(j.resultKey){
     const s=owner.parse(o.read(j.resultKey));
-    if(s.runId!==j.task.runId||s.codeId!==o.codeId||!s.closed||!s.terminal||
+    if(s.runId!==j.task.runId||(s.codeId!==o.codeId&&!s.continuous)||!s.closed||!s.terminal||
       canonical(JSON.parse(s.binding))!==canonical(j.binding))throw Error('job_saved_result_mismatch');
     return details?owner.hydrate({read:o.read},s):s;
   }
   const h=owner.head({read:o.read},details);
   if(!h.state||h.state.runId!==j.task.runId)return null;
-  if(h.state.codeId!==o.codeId||canonical(JSON.parse(h.state.binding))!==canonical(j.binding))throw Error('job_runtime_mismatch');
+  if((h.state.codeId!==o.codeId&&!(h.state.continuous&&h.state.closed&&h.state.terminal))||canonical(JSON.parse(h.state.binding))!==canonical(j.binding))throw Error('job_runtime_mismatch');
   if(o.read(owner.HEAD)!==h.raw)throw Error('job_runtime_head_changed');
   return h.state;
 }
@@ -1641,23 +1999,30 @@ function status(s,o,runId=null,details=true){
     result.phase='finished';result.reason=a==='probe_complete'&&b==='probe_complete'?'probe_records_ready':'probe_incomplete';
   }
   const health=runtime?owner.health(runtime,o.now()):null;
+  if(health&&runtime.continuous?.allowance){
+    health.quota=allowance.view(runtime.continuous.allowance,o.now());
+    if(health.quota.remaining===0){
+      health.actionsBlocked=true;
+      if(['running','waiting_target','waiting_download','waiting_next_batch'].includes(health.state))health.state='quota_exhausted';
+    }
+  }
   const interrupted=health&&['interrupted','unresponsive','expired_awaiting_close'].includes(health.state);
   return {status:interrupted?'interrupted':result.phase,job:result,runtime,health,nowMs:o.now()};
 }
 const terminal=j=>['cancelled','expired','finished'].includes(j.phase);
 function compactCompleted(s,o){
   const c=context(s,o),h=c.head();
-  const closed=[...(h.state?.history||[]),h.state?.current].filter(j=>j?.task.profile==='long-v1'&&j.resultKey&&terminal(j));
+  const closed=[...(h.state?.history||[]),h.state?.current].filter(j=>['long-v1','continuous-v1'].includes(j?.task.profile)&&j.resultKey&&terminal(j));
   // Keep the four newest completed long-run payloads. Older task summaries and
   // non-reusable run IDs remain; pre-long-v1 and other installations are untouched.
   for(const j of closed.slice(0,-4)){
     const old=owner.parse(o.read(j.resultKey));
-    if(old.runId!==j.task.runId||old.codeId!==o.codeId||!old.closed||!old.terminal||
+    if(old.runId!==j.task.runId||(old.codeId!==o.codeId&&!old.continuous)||!old.closed||!old.terminal||
       canonical(JSON.parse(old.binding))!==canonical(j.binding))throw Error('completed_retention_mismatch');
     const active=owner.head({read:o.read},false);
     if(active.state?.generation===old.generation)throw Error('cannot_retire_current_head');
     if(old.evidenceRetired!==true){
-    const summary={evidenceRetired:true};
+    const summary={evidenceRetired:true,...(old.continuous?{continuous:{scope:old.continuous.scope},retiredPageRange:[(old.continuous.actionGcThrough||0)+1,old.attemptsReserved]}:{})};
     for(const key of ['version','generation','runId','codeId','binding','closed','terminal','reason','originMs',
       'samples','sessions','invocations','attemptsReserved','updatedMs'])summary[key]=old[key];
     const raw=JSON.stringify(summary);
@@ -1666,13 +2031,15 @@ function compactCompleted(s,o){
     }
     // A crash after index commit must not permanently skip page reclamation.
     // Index now refers to a summary; remove only this retired run's bounded pages.
-    for(let i=1;i<=schedule.longMaxAttempts;i++){const k=owner.pageKey(old.runId,i);
+    const range=old.retiredPageRange??(old.continuous?[(old.continuous.actionGcThrough||0)+1,old.attemptsReserved]:[1,schedule.longMaxAttempts]);
+    for(let i=range[0];i<=range[1];i++){const k=owner.pageKey(old.runId,i);
       if(o.read(k)!==null&&(o.write(null,k)!==true||o.read(k)!==null))throw Error('evidence_retention_failed');}
   }
 }
 function archive(state,j){state.history.push(j);if(state.history.length>16)state.history.shift();}
 function submit(s,o,t,replaces=null){
   validateTask(t);
+  if(!!s.budgetScope!==(t.profile==='continuous-v1'))throw Error('continuous_scope_profile_mismatch');
   if(s.layout==='single-worker-v1'&&t.kind==='probe')throw Error('probe_requires_diagnostic_layout');
   if(s.layout==='diagnostic-pair-v1'&&t.kind!=='probe')throw Error('diagnostic_layout_only');
   if(t.kind==='execute'&&o.capabilities?.actionsQualified!==true)throw Error('active_build_not_qualified');
@@ -1683,12 +2050,15 @@ function submit(s,o,t,replaces=null){
     if(canonical(existing.task)!==spec)throw Error('run_id_payload_changed');
     return {...status(s,o,t.runId),duplicate:true};
   }
+  if(t.profile==='continuous-v1'){const previous=owner.head({read:o.read},false).state;
+    if(previous?.continuous&&(previous.continuous.faultLocked||previous.continuous.scope!==s.budgetScope))throw Error('continuous_budget_locked_or_scope_changed');}
   if(saved!==null)throw Error('run_id_retired_or_submission_unconfirmed');
   if(o.read(owner.PREFIX+'-'+t.runId+'-root')!==null)throw Error('run_id_already_used_by_runtime');
   // A committed head is the only admission source. A failed spec write poisons
   // this ID; never retry it as a fresh task and silently move its time window.
   const now=o.now();
   const next=c.transaction(state=>{
+    if(s.budgetScope){if(t.sequence!==state.runSequence+1)throw Error('run_sequence_mismatch');state.runSequence=t.sequence;}
     let old=state.current;
     if(old){
       old=status(s,o,old.task.runId).job;
@@ -1698,6 +2068,12 @@ function submit(s,o,t,replaces=null){
         old.phase='cancelled';old.reason='rescheduled';
       }else if(!terminal(old))throw Error('previous_job_not_finished');
       archive(state,old);
+      if(s.budgetScope&&state.history.length===16&&prior?.history?.length===16){
+        const retired=prior.history[0],raw=retired.resultKey?o.read(retired.resultKey):null,r=raw?owner.parse(raw):null;
+        state.retireJob={runId:retired.task.runId,resultKey:retired.resultKey??null,
+          generation:r?.generation??null,fromAction:r?.retiredPageRange?.[0]??(r?.continuous?.actionGcThrough??0)+1,
+          toAction:r?.retiredPageRange?.[1]??r?.attemptsReserved??0};
+      }
     }else if(replaces!==null)throw Error('replacement_job_missing');
     state.current={task:copy(t),receivedMs:now,notBeforeMs:now+t.delayMs,startByMs:now+t.delayMs+t.startGraceMs,
       phase:'pending',binding:null,probeAtMs:null,reason:null};return state;
@@ -1727,9 +2103,12 @@ function admit(s,o,role){
   if(!current||terminal(current))return {reason:'idle'};
   if(current.task.kind!=='probe'&&role==='peer')return {reason:'idle'};
   const view=status(s,o,null,false),j=view.job,now=o.now();
-  if(!j||terminal({...j,phase:view.status}))return {reason:'idle'};
+  if(!j||terminal({...j,phase:view.status})){
+    if(j&&view.runtime?.closed&&view.runtime.terminal&&!terminal(current))complete(s,o,j.task.runId,view.runtime.reason);
+    return {reason:'idle'};
+  }
   if(j.task.kind!=='probe'&&role==='peer')return {reason:'idle'};
-  if(j.task.profile==='long-v1'&&role==='worker')compactCompleted(s,o);
+  if(['long-v1','continuous-v1'].includes(j.task.profile)&&role==='worker')compactCompleted(s,o);
   if(j.task.kind==='execute'&&o.capabilities?.actionsQualified!==true)return {reason:'active_build_not_qualified'};
   if(j.phase==='stopping')return {job:j,reason:'stopping'};
   if(now<j.notBeforeMs)return {reason:'waiting'};
@@ -1759,16 +2138,19 @@ function complete(s,o,runId,reason){
     }
     state.current.phase='finished';state.current.reason=reason;state.current.endedMs=o.now();return state;
   });
-  if(state.current.task.profile==='long-v1')compactCompleted(s,o);
+  if(['long-v1','continuous-v1'].includes(state.current.task.profile))compactCompleted(s,o);
   return state;
 }
 function control(q,o){
   if(!exact(q,'requestId,operation,service,codeId,task,runId,replaces')||!/^[a-f0-9]{32}$/.test(q.requestId)||
-    !['submit','status','cancel','export'].includes(q.operation)||q.codeId!==o.codeId)throw Error('invalid_job_request');
+    !['submit','status','cancel','export','topup'].includes(q.operation)||q.codeId!==o.codeId)throw Error('invalid_job_request');
   const s=validateService(q.service);let result;
   if(o.environment.system!=='tvOS'||String(o.environment['surge-build'])!==s.expectedBuild||
     o.environment['device-model']!==s.expectedModel||o.scriptType!=='generic')throw Error('wrong_tv_environment');
-  if(q.operation==='submit'){
+  if(q.operation==='topup'){
+    if(q.runId!==null||q.replaces!==null)throw Error('invalid_topup_request');
+    result=topup(s,o,q.task);
+  }else if(q.operation==='submit'){
     if(q.runId!==null)throw Error('invalid_job_request');result=submit(s,o,q.task,q.replaces);
   }else{
     if(q.task!==null||q.replaces!==null||(q.runId!==null&&!id(q.runId)))throw Error('invalid_job_request');
@@ -1785,12 +2167,33 @@ function control(q,o){
     if(q.operation==='status'&&result.runtime){const r=result.runtime;
       result.runtime={runId:r.runId,closed:r.closed,terminal:r.terminal,reason:r.reason,samples:r.samples,
         sessions:r.sessions,originMs:r.originMs,invocations:r.invocations,attemptsReserved:r.attemptsReserved,
-        updatedMs:r.updatedMs,
+        updatedMs:r.updatedMs,...(r.continuous?.allowance?{allowance:allowance.view(r.continuous.allowance,o.now()),faultLocked:r.continuous.faultLocked}:{}),
         ...(r.evidenceRetired?{evidenceRetired:true}:{})};}
   }
+  if(s.budgetScope)result.grants=context(s,o).head().state?.grants??{version:1,sequence:0,entries:[]};
   return {requestId:q.requestId,operation:q.operation,...result};
 }
-module.exports={PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control};
+function topup(s,o,g){
+  if(!s.budgetScope||o.capabilities?.actionsQualified!==true)throw Error('continuous_topup_unavailable');
+  if(!exact(g,'id,sequence,count,issuedMs,expiresMs'))throw Error('invalid_topup');
+  allowance.grants({version:1,sequence:g.sequence,entries:[g]});
+  const c=context(s,o),prior=c.head().state;
+  if(!prior?.current||prior.current.task.kind!=='execute')throw Error('no_active_continuous_job');
+  const existing=prior.grants.entries.find(x=>x.id===g.id);
+  if(existing){if(canonical(existing)!==canonical(g))throw Error('grant_id_payload_changed');
+    return {status:'grant_received',duplicate:true,grant:existing};}
+  const now=o.now(),live=status(s,o,null,false);
+  if(!['running','interrupted'].includes(live.status)||live.runtime?.terminal||live.runtime?.continuous?.faultLocked)
+    throw Error('topup_cannot_enable_or_unlock');
+  if(now<g.issuedMs||now-g.issuedMs>300000||now>=g.expiresMs)throw Error('topup_request_expired');
+  const next=c.transaction(state=>{
+    if(g.sequence!==state.grants.sequence+1)throw Error('grant_sequence_mismatch');
+    const entries=state.grants.entries.filter(x=>x.expiresMs>now);
+    if(entries.length>=8)throw Error('active_grant_capacity');
+    state.grants={version:1,sequence:g.sequence,entries:[...entries,copy(g)]};return state;
+  });return {status:'grant_received',received:true,duplicate:false,grant:copy(g),grants:next.grants};
+}
+module.exports={topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control};
 
 };
 __factories["src/autonomous/job-probe"]=function(module,exports,require){
@@ -1858,7 +2261,7 @@ function dispatch(service,role,o){
       if(role!=='worker'){done({reason:'idle',quiet:true});return;}
       o.setBinding(j.binding);
       try{runtime.start({binding:j.binding,codeId:o.codeId,sessionId:o.sessionId,capabilities:o.capabilities??{actionsQualified:false},
-        now:o.now,schedule:o.schedule,readStore:o.read,writeStore:o.write,api:o.api,done:result=>{
+        now:o.now,schedule:o.schedule,readGrants:c.readGrants,readStore:o.read,writeStore:o.write,api:o.api,done:result=>{
           try{
             const h=owner.head({read:o.read});
             if(h.state?.runId===j.task.runId&&h.state.closed&&h.state.terminal){
