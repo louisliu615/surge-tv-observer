@@ -1,4 +1,4 @@
-// Version da4dcbcd663da1872fbf07c5824a8f1aa0347a73c88061390d06dcfcd6ce25b4; phase: continuous candidate; rolling quota and expiring topups; policy and sampling unchanged, action-trial build; runtime acceptance pending.
+// Version 03fe900b48ad3d0d8a61c3432483ce87ef985ed7cc92984dd92a5653d50babf1; phase: adaptive WAIT sampling candidate; continuous-only 5 Hz quiet / 10 Hz active; protected resume; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="da4dcbcd663da1872fbf07c5824a8f1aa0347a73c88061390d06dcfcd6ce25b4";
+const __codeId="03fe900b48ad3d0d8a61c3432483ce87ef985ed7cc92984dd92a5653d50babf1";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -735,6 +735,7 @@ function explain(pipeline,f,d,first=null){
  const replacement=pipeline.replacement;
  return {version:1,stage:first?'action_revalidation':'gate_evaluation',frameTimeS:f.time_s,receivedMs:f.received_ms,
   finalReason:d.reason,path:d.reason==='stalled_own_successor'?'own_stalled_successor':'productive_download',
+  ...(f.sampling?{sampling:{...f.sampling}}:{}),
   read:{durationMs:f.read_ms,reliable:p.reliable_read,uniqueMain:f.unique_main},
   core:{reason:p.decision_reason,elapsedS:p.elapsed_s,lowAgeS:lowAge,recoveryUsed:p.recovery_used,
    holdUntilElapsedS:p.hold_until_s,holdRemainingS:remaining(p.hold_until_s,p.elapsed_s)},
@@ -754,6 +755,101 @@ function explain(pipeline,f,d,first=null){
 module.exports={explain};
 
 };
+__factories["src/policy/wait-sampling"]=function(module,exports,require){
+'use strict';
+// Continuous runtime only. Dwell is ephemeral; a lost WAIT and its one-shot
+// measurement bound are durable. This is not a player buffer-watermark signal.
+const FAST=100,WAIT=200,ABSENT=1000,DWELL=1000;
+const fp=r=>`${r.id}/${r.started}/${r.engine}`;
+const finite=x=>typeof x==='number'&&Number.isFinite(x);
+const fresh=()=>({version:1,intent:null,identity:null,growthUpperMs:null,newSeenMs:null,newSeenKey:null,
+  guardStartMs:null,guardUntilMs:null});
+class WaitSampling {
+  constructor(saved=null){this.s=saved?WaitSampling.validate(saved):fresh();this.resetCadence(false);}
+  static validate(s){
+    if(!s||Object.keys(s).sort().join()!==Object.keys(fresh()).sort().join()||s.version!==1||
+      ![null,'waiting','uncertain'].includes(s.intent)||
+      !(s.identity===null||typeof s.identity==='string'&&s.identity.length<150)||
+      !(s.newSeenKey===null||typeof s.newSeenKey==='string'&&s.newSeenKey.length<150)||
+      ((s.newSeenMs===null)!==(s.newSeenKey===null))||
+      !['growthUpperMs','newSeenMs','guardStartMs','guardUntilMs'].every(k=>s[k]===null||finite(s[k])&&s[k]>=0)||
+      ((s.guardStartMs===null)!==(s.guardUntilMs===null))||
+      (s.guardStartMs!==null&&Math.abs(s.guardUntilMs-s.guardStartMs-4000)>1e-5)||
+      (s.intent===null&&(s.identity!==null||s.growthUpperMs!==null||s.newSeenMs!==null||s.newSeenKey!==null))||
+      (s.intent!==null&&s.identity===null))throw Error('invalid_wait_sampling');
+    return {...s};
+  }
+  resetCadence(markLost=true){
+    this.previous=null;this.stableSince=null;this.periodMs=FAST;this.coarseRead=false;this.unchanged=false;
+    // A handoff must not forget a coarse interval that might contain growth.
+    if(markLost&&this.s.intent!==null)this.s.intent='uncertain';
+  }
+  lost(){if(this.s.intent!==null)this.s.intent='uncertain';this.s.newSeenMs=null;this.s.newSeenKey=null;
+    this.stableSince=null;this.periodMs=FAST;}
+  afterAction(){this.s=fresh();this.resetCadence();}
+  ingest(f){
+    const s=this.s,t=f.time_s*1000,row=f.targets.length===1?f.targets[0]:null,old=this.previous;
+    const same=!!(row&&old&&old.key===fp(row));
+    const contiguous=f.read_ms<=250&&old&&old.readMs<=250&&t>old.time&&t-old.time<=500+1e-6&&
+      (!same||row.inBytes>=old.bytes);
+    const reliable=f.point.reliable_read===true&&contiguous&&same;
+    this.unchanged=!!(reliable&&row.inBytes===old.bytes);
+    this.coarseRead=this.periodMs===WAIT;
+    if(s.intent!==null){
+      if(!reliable){
+        s.intent='uncertain';
+        // New identities retain their first-observed natural startup origin.
+        // Do not move it forward on each baseline/read or on continuous churn.
+        if(!contiguous||!row||(s.newSeenKey!==null&&fp(row)!==s.newSeenKey)){s.newSeenMs=null;s.newSeenKey=null;}
+        if(row&&fp(row)!==s.identity&&(!old||fp(row)!==old.key)&&s.newSeenMs===null&&f.read_ms<=250){
+          s.newSeenMs=t;s.newSeenKey=fp(row);
+        }
+      }else if(row.inBytes>old.bytes&&s.growthUpperMs===null){s.growthUpperMs=f.received_ms;}
+      const p=f.point,substantial=p.reliable_read===true&&f.read_ms<=250&&p.state==='DOWNLOAD'&&
+        p.protected===false&&f.unique_main===true&&p.main_delta_bytes>0&&p.main_delta_bytes>=p.current_growth_floor_bytes;
+      if(substantial){
+        const start=s.newSeenMs??(s.intent==='uncertain'?f.received_ms:s.growthUpperMs??f.received_ms);
+        s.guardStartMs=start;s.guardUntilMs=start+4000;
+        s.intent=null;s.identity=null;s.growthUpperMs=null;s.newSeenMs=null;s.newSeenKey=null;
+      }
+    }
+    this.previous=row?{key:fp(row),bytes:row.inBytes,time:t,readMs:f.read_ms}:null;
+    return this.view(f);
+  }
+  view(f){return {periodMs:this.periodMs,coarseRead:!!this.coarseRead,intent:this.s.intent,
+    guardStartMs:this.s.guardStartMs,guardUntilMs:this.s.guardUntilMs,
+    remainingMs:this.s.guardUntilMs===null?0:Math.max(0,this.s.guardUntilMs-f.time_s*1000)};}
+  filter(f,d){
+    if(!d.row)return d;
+    if(this.s.intent!==null)return {row:null,reason:'sampling_wait_resume_unresolved'};
+    if(this.s.guardUntilMs!==null&&f.time_s*1000<this.s.guardUntilMs)
+      return {row:null,reason:'sampling_resume_startup'};
+    if(this.coarseRead)return {row:null,reason:'sampling_requires_fast_recheck'};
+    return d;
+  }
+  next(f,pipeline,pending){
+    const s=this.s,r=pipeline.review?.s,p=f.point;
+    const ownPending=r&&r.actionAt!==null&&!r.resumed&&!r.disarmed;
+    const entryPending=r&&r.entryAt!=null&&f.time_s-r.entryAt<4;
+    const safe=this.unchanged&&f.targets.length===1&&p.state==='WAIT'&&p.protected===false&&
+      f.startup.waiting&&!f.startup.awaiting_own_successor&&f.startup.remaining_s===0&&
+      f.rearm.window_remaining_s===0&&!ownPending&&!entryPending&&!pending&&
+      (s.guardUntilMs===null||f.time_s*1000>=s.guardUntilMs);
+    if(safe){
+      if(this.stableSince===null)this.stableSince=f.time_s*1000;
+      if(f.time_s*1000-this.stableSince>=DWELL-1e-6){
+        // Reliable quiet re-established: an isolated pulse cannot consume a
+        // later download's origin. Only renewed confirmed WAIT rearms this.
+        s.intent='waiting';s.identity=fp(f.targets[0]);s.growthUpperMs=null;s.newSeenMs=null;s.newSeenKey=null;
+        this.periodMs=WAIT;return WAIT;
+      }
+    }else this.stableSince=null;
+    this.periodMs=f.targets.length?FAST:ABSENT;return this.periodMs;
+  }
+}
+module.exports={WaitSampling,FAST,WAIT,ABSENT,DWELL};
+
+};
 __factories["src/pipeline"]=function(module,exports,require){
 'use strict';
 // Pure TV decision pipeline. The executed historical modules remain unchanged.
@@ -762,6 +858,7 @@ const {create}=require('./core/adapter');
 const {RetryRearm}=require('./policy/retry-rearm-policy');
 const {DownloadStartup}=require('./policy/download-startup-policy');
 const {RecoveryReview}=require('./policy/recovery-review-policy');
+const {WaitSampling}=require('./policy/wait-sampling');
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const POLICY=Object.freeze({startup_s:4,near_zero_Bps:40960,quiet_window_s:.4,quiet_confirm_s:.6});
@@ -829,6 +926,10 @@ class Replacement{
   allows(row){const fp=fingerprint(row);return this.absent>=2&&!this.known.has(fp)&&this.growing.has(fp);}
 }
 class Pipeline{
+  enableWaitSampling(saved=null){
+    if(!this.continuous)throw Error('wait_sampling_requires_continuous');
+    this.sampling=new WaitSampling(saved);
+  }
   constructor(profile=null){
     if(profile!==null&&!['long-v1','continuous-v1'].includes(profile))throw Error('invalid_pipeline_profile');
     this.continuous=profile==='continuous-v1';
@@ -867,9 +968,14 @@ class Pipeline{
         this.replacement.growing=new Set([...this.replacement.growing].filter(k=>present.has(k)));}
     }
     if(this.review)this.review.ingest(frame);
+    if(this.sampling)frame.sampling=this.sampling.ingest(frame);
     return frame;
   }
   consider(frame){
+    const d=this.considerMeasurement(frame);
+    return this.sampling?this.sampling.filter(frame,d):d;
+  }
+  considerMeasurement(frame){
     const rescue=this.review?.consider(frame);
     if(rescue?.row)return rescue;
     const decision=this.gate.consider(frame);
@@ -892,6 +998,7 @@ class Pipeline{
     return d;
   }
   afterAction(action,timeMs){
+    if(this.sampling)this.sampling.afterAction();
     if(this.review)this.review.afterAction(action,timeMs/1000);
     this.detector.discardEvidence();this.detector.protect();this.gate.reset();
     this.own.afterAction(timeMs/1000);this.startup.afterAction(timeMs/1000);
@@ -1088,7 +1195,7 @@ function inspectJSON(x,depth=0){
 }
 function capture(p){
   const s=p.startup;
-  return copy({version:1,...(p.continuous?{continuous:true}:{}),...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
+  return copy({version:1,...(p.continuous?{continuous:true}:{}),...(p.sampling?{sampling:p.sampling.s}:{}),...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
     startup:{clock:s.clock,previous:s.previous?{...s.previous,rows:[...s.previous.rows]}:null,
       history:s.history,tracks:[...s.tracks],quietSince:s.quietSince,waiting:s.waiting,waitOrigin:s.waitOrigin,
       start:s.start,end:s.end,source:s.source,episode:s.episode,awaitOwnSuccessor:s.awaitOwnSuccessor},
@@ -1098,10 +1205,11 @@ function capture(p){
 }
 function restore(x){
   if(JSON.stringify(x).length>196608)throw Error('snapshot_capacity');inspectJSON(x);
-  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[]),...('continuous' in x?['continuous']:[])]);
+  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[]),...('continuous' in x?['continuous']:[]),...('sampling' in x?['sampling']:[])]);
   if(x.version!==1||!(x.lastTime===null||finite(x.lastTime)))throw Error('snapshot_version');
   if('continuous' in x&&x.continuous!==true)throw Error('snapshot_profile');
   const p=new Pipeline(x.continuous?'continuous-v1':'review' in x?'long-v1':null);if(!p.detector.restore(x.core))throw Error('snapshot_core');
+  if('sampling' in x)p.enableWaitSampling(x.sampling);
   if(p.review){
     const r=x.review;exact(r,Object.keys(p.review.s));
     if(!times(r,['actionAt','quietAt','emptyAt','emptyLast','entryAt'])||typeof r.hadTarget!=='boolean'||!integer(r.rescues)||r.rescues>1||
@@ -1589,6 +1697,7 @@ function start(o){
     if(!recoveryBlocked)validateHandoff(parent.state,b);
     pipeline=snapshots.restore(parent.state.pipeline);
   }else pipeline=cont&&parent.state?.continuous?snapshots.restore(parent.state.pipeline):new Pipeline(b.profile??null);
+  if(cont){if(!pipeline.sampling)pipeline.enableWaitSampling();pipeline.sampling.resetCadence();}
   const sessionStart=begin,sessionDeadline=Math.min(expiry,Math.floor(begin/PERIOD)*PERIOD+PERIOD-RESERVE);
   // A final sub-second slice needs only a metadata closure, not another read.
   // Keep the old refusal for a short *non-final* cron slice.
@@ -1622,6 +1731,7 @@ function start(o){
   },recovering?begin:null);
   if(!claim.accepted){done(claim.reason);return;}
   owned=claim.header;state=claim.state;
+  if(cont&&!state.samplingCounts)state.samplingCounts={baselineSamples:state.samples,fast:0,waiting:0,absent:0};
   if(state.longEvidence)state.longEvidence.generations.push(state.generation);
   const encode=ownership.writer(store);
   let nextCheckpoint=begin+schedule.checkpointMs,signalCheck=null,cachedStop=null,cachedObserve=null,lastFrame=null;
@@ -1735,6 +1845,7 @@ function start(o){
     return true;
   }
   function readFailure(reason){
+    pipeline.sampling?.lost();
     pending=null;state.readFailures=(state.readFailures||0)+1;state.readErrors=(state.readErrors||0)+1;
     state.lastFault=reason;event('read_failed',{reason,consecutive:state.readFailures});
     diagnostics.fault(state.diagnostics,'read_failure',state,now(),reason,{lastCheckpointMs:lastPersistedMs});
@@ -1769,6 +1880,7 @@ function start(o){
           {observedEngine,lastCheckpointMs:lastPersistedMs});
         const old=pipeline,ownPending=old.own.actionAt!==null&&end/1000-old.own.actionAt<5;
         pipeline=new Pipeline('continuous-v1');Object.assign(pipeline.own,old.own);
+        pipeline.enableWaitSampling(old.sampling?.s??null);pipeline.sampling.resetCadence();
         pipeline.review.s={...old.review.s,disarmed:'successor_lost_or_ambiguous',successor:null,previous:null,
           quietAt:null,fast:null,hadTarget:ownPending,emptyAt:null,emptyLast:null,entryAt:null};
         if(ownPending)pipeline.startup.afterAction(old.own.actionAt);
@@ -1780,6 +1892,8 @@ function start(o){
         state.samples===(same?parent.state.samples:0)&&same?parent.state.updatedMs:lastPersistedMs);
       state.lastSuccessfulReadMs=end;
       state.samples++;state.maxReadMs=Math.max(state.maxReadMs,f.read_ms);
+      if(cont){const priorPeriod=f.sampling.periodMs;
+        state.samplingCounts[priorPeriod===100?'fast':priorPeriod===200?'waiting':'absent']++;}
       if(state.lastSampleMs!==null)state.maxIntervalMs=Math.max(state.maxIntervalMs,f.time_s*1000-state.lastSampleMs);
       state.lastSampleMs=f.time_s*1000;state.states[f.point.state]=(state.states[f.point.state]||0)+1;
       if(f.point.candidate)state.candidates++;
@@ -1796,10 +1910,10 @@ function start(o){
           if(fresh.row&&action(f,fresh,first))return;
         }else pending={row:d.row,reason:d.reason,receivedMs:end};
       }else pending=null;
+      // Continuous-only stable-WAIT optimization. Revalidation and all recovery
+      // stay fast; legacy finite profiles retain their original cadence.
+      const period=pipeline.sampling?pipeline.sampling.next(f,pipeline,pending):f.targets.length?100:1000;
       if(end>=nextCheckpoint){persist();nextCheckpoint=end+schedule.checkpointMs;}
-      // Only absence of all target connections lowers frequency. Buffered WAIT
-      // with a target retains 100 ms sampling and unchanged startup semantics.
-      const period=f.targets.length?100:1000;
       later(tick,Math.min(Math.max(1,t+period-now()),Math.max(1,sessionDeadline-now())));
     }));}catch(_){if(!replied&&generation===token){replied=true;token++;readFailure('read_exception');}}
   }
