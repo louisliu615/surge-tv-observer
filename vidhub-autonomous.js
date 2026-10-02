@@ -1,4 +1,4 @@
-// Version 03fe900b48ad3d0d8a61c3432483ce87ef985ed7cc92984dd92a5653d50babf1; phase: adaptive WAIT sampling candidate; continuous-only 5 Hz quiet / 10 Hz active; protected resume; action-trial build; runtime acceptance pending.
+// Version e764cc94d23bd5febb9abdb2c6bb45de0789dc12a78370535cefd3e11f814d7e; phase: forward Surge build compatibility and adaptive WAIT test candidate; protected resume; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="03fe900b48ad3d0d8a61c3432483ce87ef985ed7cc92984dd92a5653d50babf1";
+const __codeId="e764cc94d23bd5febb9abdb2c6bb45de0789dc12a78370535cefd3e11f814d7e";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -1619,6 +1619,15 @@ function compact(f){const p=f.point;return [Math.round(f.time_s*1000),f.read_ms,
   f.targets.map(r=>[r.id,r.inBytes])];}
 function validateHandoff(s,b){
   if(s.diagnostics)diagnostics.validate(s.diagnostics);
+  if(s.surgeBuild){
+    const v=s.surgeBuild,build=x=>typeof x==='string'&&/^[1-9][0-9]{0,9}$/.test(x);
+    if(!build(v.baseline)||!build(v.current)||v.baseline!==b.expectedBuild||Number(v.current)<Number(v.baseline)||
+      !integer(v.changes)||!Array.isArray(v.history)||v.history.length!==Math.min(8,v.changes)||
+      v.history.some((h,i)=>!build(h.from)||!build(h.to)||Number(h.to)<=Number(h.from)||!integer(h.observedMs)||
+        h.observedMs>s.updatedMs||typeof h.rebaselined!=='boolean'||
+        i>0&&(h.from!==v.history[i-1].to||h.observedMs<v.history[i-1].observedMs))||
+      v.history.length&&v.history.at(-1).to!==v.current)throw Error('invalid_build_history');
+  }
   const cont=b.profile==='continuous-v1';
   if(cont){continuous.validateState(s.continuous,b);
     if(s.continuous.ownerGcThrough>s.generation)throw Error('invalid_retention_cursor');
@@ -1698,6 +1707,21 @@ function start(o){
     pipeline=snapshots.restore(parent.state.pipeline);
   }else pipeline=cont&&parent.state?.continuous?snapshots.restore(parent.state.pipeline):new Pipeline(b.profile??null);
   if(cont){if(!pipeline.sampling)pipeline.enableWaitSampling();pipeline.sampling.resetCadence();}
+  const actualBuild=o.surgeBuild??null,previousBuild=parent.state?.surgeBuild?.current??b.expectedBuild;
+  if(actualBuild!==null&&(!/^[1-9][0-9]{0,9}$/.test(actualBuild)||
+    !/^[1-9][0-9]{0,9}$/.test(previousBuild)||Number(actualBuild)<Number(previousBuild))){
+    done('surge_build_rollback');return;
+  }
+  const buildChanged=actualBuild!==null&&actualBuild!==previousBuild;
+  function rebaseline(old,t){
+    const p=new Pipeline('continuous-v1'),ownPending=old.own.actionAt!==null&&t/1000-old.own.actionAt<5;
+    Object.assign(p.own,old.own);p.enableWaitSampling(old.sampling?.s??null);p.sampling.resetCadence();
+    p.review.s={...old.review.s,disarmed:'successor_lost_or_ambiguous',successor:null,previous:null,
+      quietAt:null,fast:null,hadTarget:ownPending,emptyAt:null,emptyLast:null,entryAt:null};
+    if(ownPending)p.startup.afterAction(old.own.actionAt);
+    return p;
+  }
+  if(cont&&buildChanged)pipeline=rebaseline(pipeline,begin);
   const sessionStart=begin,sessionDeadline=Math.min(expiry,Math.floor(begin/PERIOD)*PERIOD+PERIOD-RESERVE);
   // A final sub-second slice needs only a metadata closure, not another read.
   // Keep the old refusal for a short *non-final* cron slice.
@@ -1732,6 +1756,15 @@ function start(o){
   if(!claim.accepted){done(claim.reason);return;}
   owned=claim.header;state=claim.state;
   if(cont&&!state.samplingCounts)state.samplingCounts={baselineSamples:state.samples,fast:0,waiting:0,absent:0};
+  if(actualBuild!==null){
+    if(!state.surgeBuild)state.surgeBuild={baseline:b.expectedBuild,current:previousBuild,changes:0,history:[]};
+    if(buildChanged){
+      state.surgeBuild.changes++;
+      state.surgeBuild.history.push({observedMs:begin,from:previousBuild,to:actualBuild,rebaselined:cont});
+      state.surgeBuild.history=state.surgeBuild.history.slice(-8);
+    }
+    state.surgeBuild.current=actualBuild;
+  }
   if(state.longEvidence)state.longEvidence.generations.push(state.generation);
   const encode=ownership.writer(store);
   let nextCheckpoint=begin+schedule.checkpointMs,signalCheck=null,cachedStop=null,cachedObserve=null,lastFrame=null;
@@ -1878,12 +1911,7 @@ function start(o){
       if(cont&&b.engineRecovery==='auto'&&observedEngine!==null&&state.streamId!==null&&observedEngine!==state.streamId){
         diagnostics.fault(state.diagnostics,'engine_rebaseline',state,end,'engine_changed_rebaseline',
           {observedEngine,lastCheckpointMs:lastPersistedMs});
-        const old=pipeline,ownPending=old.own.actionAt!==null&&end/1000-old.own.actionAt<5;
-        pipeline=new Pipeline('continuous-v1');Object.assign(pipeline.own,old.own);
-        pipeline.enableWaitSampling(old.sampling?.s??null);pipeline.sampling.resetCadence();
-        pipeline.review.s={...old.review.s,disarmed:'successor_lost_or_ambiguous',successor:null,previous:null,
-          quietAt:null,fast:null,hadTarget:ownPending,emptyAt:null,emptyLast:null,entryAt:null};
-        if(ownPending)pipeline.startup.afterAction(old.own.actionAt);
+        pipeline=rebaseline(pipeline,end);
         state.streamId=observedEngine;pending=null;
       }
       const f=pipeline.ingest(payload,t,end,state.streamId===null?undefined:state.streamId);lastFrame=f;
@@ -2258,12 +2286,21 @@ function complete(s,o,runId,reason){
   if(['long-v1','continuous-v1'].includes(state.current.task.profile))compactCompleted(s,o);
   return state;
 }
+// expectedBuild remains an immutable baseline in saved bindings. An application
+// update is not a device change; never rewrite job/grant identities to match it.
+function checkEnvironment(s,e){
+  const build=e&&String(e['surge-build']);
+  if(!e||e.system!=='tvOS'||e['device-model']!==s.expectedModel||
+    !/^[1-9][0-9]{0,9}$/.test(build)||!/^[1-9][0-9]{0,9}$/.test(s.expectedBuild)||
+    Number(build)<Number(s.expectedBuild))throw Error('wrong_tv_environment');
+  return build;
+}
 function control(q,o){
   if(!exact(q,'requestId,operation,service,codeId,task,runId,replaces')||!/^[a-f0-9]{32}$/.test(q.requestId)||
     !['submit','status','cancel','export','topup'].includes(q.operation)||q.codeId!==o.codeId)throw Error('invalid_job_request');
   const s=validateService(q.service);let result;
-  if(o.environment.system!=='tvOS'||String(o.environment['surge-build'])!==s.expectedBuild||
-    o.environment['device-model']!==s.expectedModel||o.scriptType!=='generic')throw Error('wrong_tv_environment');
+  checkEnvironment(s,o.environment);
+  if(o.scriptType!=='generic')throw Error('wrong_tv_environment');
   if(q.operation==='topup'){
     if(q.runId!==null||q.replaces!==null)throw Error('invalid_topup_request');
     result=topup(s,o,q.task);
@@ -2310,7 +2347,7 @@ function topup(s,o,g){
     state.grants={version:1,sequence:g.sequence,entries:[...entries,copy(g)]};return state;
   });return {status:'grant_received',received:true,duplicate:false,grant:copy(g),grants:next.grants};
 }
-module.exports={topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control};
+module.exports={topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control,checkEnvironment};
 
 };
 __factories["src/autonomous/job-probe"]=function(module,exports,require){
@@ -2377,7 +2414,7 @@ function dispatch(service,role,o){
     if(j.task.kind!=='probe'){
       if(role!=='worker'){done({reason:'idle',quiet:true});return;}
       o.setBinding(j.binding);
-      try{runtime.start({binding:j.binding,codeId:o.codeId,sessionId:o.sessionId,capabilities:o.capabilities??{actionsQualified:false},
+      try{runtime.start({binding:j.binding,codeId:o.codeId,sessionId:o.sessionId,capabilities:o.capabilities??{actionsQualified:false},surgeBuild:o.surgeBuild,
         now:o.now,schedule:o.schedule,readGrants:c.readGrants,readStore:o.read,writeStore:o.write,api:o.api,done:result=>{
           try{
             const h=owner.head({read:o.read});
@@ -2423,14 +2460,14 @@ module.exports={dispatch};
     const envelope=JSON.parse(decodeURIComponent($argument));
     if(envelope&&Object.keys(envelope).sort().join()==='operation,service'&&envelope.operation==='service'){
       const s=__require('src/autonomous/jobs').validateService(envelope.service);
-      if($environment.system!=='tvOS'||String($environment['surge-build'])!==s.expectedBuild||
-        $environment['device-model']!==s.expectedModel)throw Error('wrong_tv_environment');
+      const surgeBuild=__require('src/autonomous/jobs').checkEnvironment(s,
+        typeof $environment==='object'?$environment:null);
       const role=$script.name==='vidhub-job-worker'?'worker':$script.name==='vidhub-job-peer'?'peer':null;
       if(!role||$script.type!=='cron'||typeof $trigger!=='undefined'||typeof $cronexp!=='string'||
         $cronexp!==__require('src/autonomous/schedule').cron)throw Error('configured_timer_required');
       // Core module defaults need the fixed target before the runtime is loaded.
       __binding=s;
-      __require('src/autonomous/job-service').dispatch(s,role,{codeId:__codeId,sessionId:$script.sessionID,capabilities:__capabilities,
+      __require('src/autonomous/job-service').dispatch(s,role,{codeId:__codeId,sessionId:$script.sessionID,capabilities:__capabilities,surgeBuild,
         now:()=>Date.now(),schedule:(fn,ms)=>setTimeout(fn,ms),read:k=>$persistentStore.read(k),
         write:(v,k)=>$persistentStore.write(v,k),setBinding:b=>{__binding=b;},
         api:(method,path,body,cb)=>{
