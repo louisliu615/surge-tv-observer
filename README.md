@@ -1,44 +1,28 @@
-# TEST VERSION: adaptive-wait-5hz-test-v2
+# TEST VERSION: adaptive-wait-4hz-dispatch-fix
 
-Experimental adaptive sampling and automatic Surge build compatibility build. Published separately for testing; **not deployed and not accepted on a TV**.
+This is an independent test release. The stable `main` branch remains at `62537e48c6f4b04c9f13bd221160bb765210fa53`. The prior test `22074736` remains immutable. Publication does not deploy a configuration or start a task. Use the full fixed commit URL.
 
-The stable `main` branch remains at [62537e48](https://github.com/louisliu615/surge-tv-observer/commit/62537e48c6f4b04c9f13bd221160bb765210fa53). This test is isolated on `codex/adaptive-wait-5hz-test-v2`. Use an immutable commit URL when selecting a script version; publication does not change an installed configuration or running task.
+Build identity: `910a0ca5b273d16d9377b7b25eedb7fd031bbc205149d37b8536139971926de1`. Offline verification: 467 checks passed, including real fault-state replay, 200-slot migration, clock advancement within synchronous callbacks, unknown-result guards, bounded storage, and 13,704 historical frames. TV deployment and this version's runtime behavior are not yet verified.
 
-## Scope
+## Changes
 
-Only the `continuous-v1` runtime adopts adaptive sampling:
+- A durable action reservation can make its measurement stale. The worker now takes at most one fresh read and revalidates the same eligible connection before dispatch. The 250 ms freshness rule is unchanged. If no longer eligible, it records a proven non-dispatch cancellation and continues observing. Failed/unknown persistence, lost ownership, interrupted pending actions and unknown action replies still stop safely.
+- Reserved attempts remain charged even when a known non-dispatch is cancelled. Actual invocations have separate sequential records. The most recent 16 cancellations are retained; no refunds, task resets or implicit unlocks.
+- Removed duplicate serialization of the fully expanded action history from the persistence path. `maxRootBytes` explicitly measures the stored root at a preceding checkpoint; historical `maxSavedBytes` is not a heap or database measurement.
+- Strict, stable WAIT uses 250 ms (4 Hz), compared with the prior test's 200 ms (5 Hz). Download, startup, uncertainty, post-action recovery and final validation remain fast (100 ms). No target remains 1000 ms. WAIT is a counter-derived traffic state, not proof of a full player buffer.
+- Added bounded sampling evidence: target presence by cadence totals, 288 five-minute bins and 32 growth-resumption excerpts. Existing checkpoint timing and local-only storage are retained. No external telemetry, extra scheduler or always-on computer collector.
+- Continuous installations may explicitly select `baseLimit: 100` or `baseLimit: 200`. The default stays 100. A closed-service upgrade preserves the budget scope, all unexpired consumption, lifetime sequence, grants and last action time; only the limit rises. Slots release individually after 24 hours, not at midnight. Raising quota never unlocks an unknown action or overrides protection.
 
-| Observed state | Nominal polling rate |
-| --- | --- |
-| Active download, startup, own-action recovery, uncertain measurement | 10 Hz |
-| One unchanged target with reliable WAIT, strictly zero byte growth, all relevant guards cleared, then one additional stable second | 5 Hz |
-| No target | 1 Hz, unchanged |
+## Unchanged limits
 
-Any observed byte growth, identity/count change or uncertainty restores fast polling. WAIT is a traffic classification, not a measurement of player buffer occupancy. Sampling requests remain serial; actual rates depend on response time and scheduling.
+The low-rate threshold, natural startup protection, fixed post-action protection, ordinary near-zero protection and bounded own-successor rescue policy are unchanged. Single-worker, two-minute cron lifecycle and forward Surge-build handling are retained. Invalid/changed APIs still block actions. Finite profiles retain their existing per-task caps.
 
-Coarse-sampling resume evidence preserves the existing four-second natural startup protection conservatively. Identity changes cannot reuse another connection's first-seen time. Recovery evidence survives handoff and uncertain reads. The existing five-second protection after an own action, speed threshold, rescue rules and rolling budget semantics are unchanged. Finite tasks, `long-v1` and the default standalone Pipeline retain their previous behavior.
+The root remains bounded to 512 KiB. Action excerpts use immutable pages, keeping at most 100 recent action records; old evidence is reclaimed. This is not full continuous raw capture. Increasing rolling quota does not increase the action-page retention limit.
 
-## Validation and limits
+## Upgrade and evidence boundaries
 
-- 429 local checks passed, including 22 targeted adaptive-sampling checks, 9 build-transition/migration checks and 4 maintenance-tool checks and the compiled service entry point.
-- Independent Astra review identified two startup-boundary defects; both were fixed and regression tested.
-- Replay covered 13,704 original frames in three traces, at four sampling phases each. No effective startup deadline advanced; four reviewable nighttime events still matched.
-- Request count fell about 21.35–21.66% in the daytime intermittent-download trace and 2.62–2.68% in the nighttime trace. This is not a CPU, energy or playback-benefit measurement.
-- TV scheduling, viewing behavior and resource cost of this test build remain unverified. Deployment delivery and initial script-download issues are outside this change.
+Fixed-version deployments must be checked in layers: source staging, TV declaration, resource readiness, actual autonomous execution and measured action behavior. Existing fault locks require a separately reviewed, exact-state maintenance step where the old code proves non-dispatch; this public worker is not a general unlock tool. No private helper or fault snapshot is included here.
 
-This is an action-capable bundle, subject to the existing task, binding and budget controls. Publishing it alone neither enables actions nor changes a device. No private configuration, binding, device identity, target address or credential is included in these three release files.
+Historical replay cannot establish future performance or causality. Poll-count savings are not CPU, power, memory or viewing-quality savings. More quota provides capacity, not a guarantee that repeated reconnects improve a slow source or route.
 
-## Automatic Surge build upgrades
-
-The configured build remains an immutable minimum baseline. New service workers and store-only control helpers accept numeric builds at or above that baseline while retaining tvOS, device-model, target, binding and declaration checks. No configuration rewrite or new task is needed for a routine forward build update after this version is installed and running.
-
-The continuous worker records up to eight recent build transitions and a cumulative transition count. A changed build rebuilds the measurement baseline while retaining quota, grants and the last own-action timestamp. It refuses rollback below the last observed build. Unknown actions and fault locks remain protected. Invalid traffic API responses still stop actions through existing validation and bounded read retries; accepting a build number is not a promise to support arbitrary future API changes.
-
-Upgrading an already interrupted legacy exact-build installation requires a one-time, separately checked metadata migration and a new task under the same budget scope. That migration is a local maintenance tool, not an automatic action of this public script. It preserves historical evidence and consumption; publication does not run it.
-
-## Build identity
-
-- Code ID: `e764cc94d23bd5febb9abdb2c6bb45de0789dc12a78370535cefd3e11f814d7e`
-- Script SHA-256: `3e13c7a6afebddac6609c67f08a55d973843ad6f758f5fadf62cc1c0387eb3df`
-- Script size: 152,136 bytes
-- `SHA256SUMS` covers this README and `vidhub-autonomous.js`.
+This bundle contains no private endpoint, device binding, credentials, video addresses or configuration. It has no remote control endpoint or external log upload. Runtime parameters and task authorization are supplied separately through the existing local Surge service.

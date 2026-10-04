@@ -1,4 +1,4 @@
-// Version e764cc94d23bd5febb9abdb2c6bb45de0789dc12a78370535cefd3e11f814d7e; phase: forward Surge build compatibility and adaptive WAIT test candidate; protected resume; action-trial build; runtime acceptance pending.
+// Version 910a0ca5b273d16d9377b7b25eedb7fd031bbc205149d37b8536139971926de1; phase: 4 Hz stable WAIT test; fresh dispatch revalidation; bounded cancellation evidence; configurable rolling quota; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="e764cc94d23bd5febb9abdb2c6bb45de0789dc12a78370535cefd3e11f814d7e";
+const __codeId="910a0ca5b273d16d9377b7b25eedb7fd031bbc205149d37b8536139971926de1";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
@@ -759,7 +759,7 @@ __factories["src/policy/wait-sampling"]=function(module,exports,require){
 'use strict';
 // Continuous runtime only. Dwell is ephemeral; a lost WAIT and its one-shot
 // measurement bound are durable. This is not a player buffer-watermark signal.
-const FAST=100,WAIT=200,ABSENT=1000,DWELL=1000;
+const FAST=100,WAIT=250,ABSENT=1000,DWELL=1000;
 const fp=r=>`${r.id}/${r.started}/${r.engine}`;
 const finite=x=>typeof x==='number'&&Number.isFinite(x);
 const fresh=()=>({version:1,intent:null,identity:null,growthUpperMs:null,newSeenMs:null,newSeenKey:null,
@@ -1390,13 +1390,91 @@ const normalReasons=new Set(['normal_yield','trial_complete','trial_complete_aft
 module.exports={LIMIT,fresh,validate,fault,gap,isFault:reason=>!normalReasons.has(reason)};
 
 };
+__factories["src/autonomous/sampling-evidence"]=function(module,exports,require){
+'use strict';
+// Read-only telemetry. No policy input, timers, API calls or extra persistence.
+const {FAST,WAIT,ABSENT}=require('../policy/wait-sampling');
+const BIN_MS=300000,MAX_BINS=288,MAX_RESUMES=32;
+const COLUMNS=['targetFast','targetWait','targetAbsent','noTargetFast','noTargetWait','noTargetAbsent'];
+const zero=()=>[0,0,0,0,0,0],sum=a=>a.reduce((n,x)=>n+x,0);
+const integer=x=>Number.isSafeInteger(x)&&x>=0;
+const key=r=>`${r.id}/${r.started}/${r.engine}`;
+function validate(e,samples){
+  const cells=x=>Array.isArray(x)&&x.length===6&&x.every(integer);
+  if(!e||e.version!==1||e.waitPeriodMs!==WAIT||!integer(e.baselineSamples)||!cells(e.totals)||
+    e.baselineSamples+sum(e.totals)!==samples||!integer(e.resumesTotal)||!integer(e.unmeasuredWaitExits)||
+    !Array.isArray(e.bins)||e.bins.length>MAX_BINS||!Array.isArray(e.resumes)||
+    e.resumes.length!==Math.min(e.resumesTotal,MAX_RESUMES)||
+    e.bins.some((b,i)=>!integer(b.index)||!integer(b.startMs)||!integer(b.endMs)||b.endMs<b.startMs||
+      !cells(b.counts)||i>0&&b.index<=e.bins[i-1].index)||
+    e.totals.some((v,i)=>e.bins.reduce((n,b)=>n+b.counts[i],0)>v)||
+    e.resumes.some((r,i)=>r.sequence!==e.resumesTotal-e.resumes.length+i+1||
+      ![r.lastUnchangedRead,r.firstGrowthRead].every(a=>Array.isArray(a)&&a.length===2&&a.every(integer)&&a[1]>=a[0])||
+      r.firstGrowthRead[0]<r.lastUnchangedRead[1]||!integer(r.growthBytes)||!r.growthBytes||
+      !integer(r.observationBoundMs)||r.observationBoundMs!==r.firstGrowthRead[1]-r.lastUnchangedRead[0]||
+      !integer(r.updatedMs)||r.updatedMs<r.firstGrowthRead[1]||
+      !['firstFastReadMs','firstDownloadMs','guardUntilMs','firstEligibleMs','endMs'].every(k=>
+        r[k]===null||integer(r[k])&&r[k]>=r.firstGrowthRead[1])||
+      ![null,'quiet_again','identity_changed','read_gap','action','session_boundary','read_failure'].includes(r.endReason)||
+      ((r.endMs===null)!==(r.endReason===null))))throw Error('invalid_sampling_evidence');
+}
+class SamplingEvidence {
+  constructor(state){
+    this.state=state;this.previous=null;this.open=null;
+    if(!state.samplingEvidence)state.samplingEvidence={version:1,waitPeriodMs:WAIT,
+      baselineSamples:state.samples,totals:zero(),bins:[],resumes:[],resumesTotal:0,unmeasuredWaitExits:0};
+    const last=state.samplingEvidence.resumes.at(-1);
+    // A new session has no adjacent raw observations; never bridge the gap.
+    if(last&&last.endMs===null){last.endMs=last.updatedMs;last.endReason='session_boundary';}
+  }
+  close(reason,t){
+    if(this.open){this.open.endMs=Math.max(this.open.updatedMs,Math.round(t));this.open.endReason=reason;this.open=null;}
+    if(reason!=='quiet_again')this.previous=null;
+  }
+  observe(f,d){
+    const e=this.state.samplingEvidence,t=Math.round(f.received_ms),start=t-Math.round(f.read_ms);
+    const cadence=[FAST,WAIT,ABSENT].indexOf(f.sampling.periodMs);
+    if(cadence<0)throw Error('unknown_sampling_cadence');
+    const cell=cadence+(f.targets.length?0:3),index=Math.floor((t-this.state.runStartedMs)/BIN_MS);
+    let bin=e.bins.at(-1);
+    if(!bin||bin.index!==index){e.bins=e.bins.filter(b=>b.index>index-MAX_BINS);
+      bin={index,startMs:t,endMs:t,counts:zero()};e.bins.push(bin);}
+    bin.endMs=t;bin.counts[cell]++;e.totals[cell]++;
+    const r=f.targets.length===1?f.targets[0]:null,p=this.previous;
+    const same=!!(p&&r&&p.key===key(r));
+    const reliable=same&&f.point.reliable_read===true&&f.read_ms<=250&&p.readMs<=250&&
+      f.time_s*1000>p.midMs&&f.time_s*1000-p.midMs<=500+1e-6&&r.inBytes>=p.bytes;
+    if(this.open&&(!same||!reliable))this.close(same?'read_gap':'identity_changed',t);
+    if(f.sampling.periodMs===WAIT){
+      if(!reliable)e.unmeasuredWaitExits++;
+      else if(r.inBytes>p.bytes){
+        // True growth began somewhere between these observations. The bound
+        // includes API read time; it is NOT an exact measured detection delay.
+        const event={sequence:++e.resumesTotal,lastUnchangedRead:[p.startMs,p.endMs],firstGrowthRead:[start,t],
+          observationBoundMs:t-p.startMs,growthBytes:r.inBytes-p.bytes,updatedMs:t,
+          firstFastReadMs:null,firstDownloadMs:null,guardUntilMs:null,firstEligibleMs:null,endMs:null,endReason:null};
+        e.resumes.push(event);if(e.resumes.length>MAX_RESUMES)e.resumes.shift();this.open=event;
+      }
+    }
+    if(this.open){const a=this.open;a.updatedMs=t;
+      if(reliable&&f.sampling.periodMs===FAST&&a.firstFastReadMs===null)a.firstFastReadMs=t;
+      if(reliable&&f.point.state==='DOWNLOAD'&&a.firstDownloadMs===null)a.firstDownloadMs=t;
+      if(f.sampling.guardUntilMs!==null&&f.sampling.guardUntilMs>=a.firstGrowthRead[1])a.guardUntilMs=Math.round(f.sampling.guardUntilMs);
+      if(d.row&&a.firstEligibleMs===null)a.firstEligibleMs=t;}
+    this.previous=r?{key:key(r),bytes:r.inBytes,startMs:start,endMs:t,midMs:f.time_s*1000,readMs:f.read_ms}:null;
+  }
+  planned(period,t){if(period===WAIT&&this.open)this.close('quiet_again',t);}
+}
+module.exports={SamplingEvidence,validate,COLUMNS,BIN_MS,MAX_BINS,MAX_RESUMES};
+
+};
 __factories["src/autonomous/rolling-budget"]=function(module,exports,require){
 'use strict';
 // Pure rolling ledger used by the continuous runtime allowance.
 // A reservation consumes capacity even if dispatch/reply is subsequently unknown.
 // The caller must persist and read back `next` under exclusive ownership BEFORE
 // dispatch. Never create a fresh ledger merely because a run/session changed.
-const WINDOW_MS=86400000,MAX_LIMIT=100;
+const WINDOW_MS=86400000,MAX_LIMIT=200;
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&
   Object.keys(x).sort().join()===keys.slice().sort().join();
@@ -1417,7 +1495,7 @@ function validate(s){
   }
   return s;
 }
-function fresh(scope,now,limit=MAX_LIMIT){
+function fresh(scope,now,limit=100){
   return validate({version:1,scope,limit,windowMs:WINDOW_MS,observedMs:now,totalReserved:0,entries:[]});
 }
 function advance(s,now){
@@ -1461,7 +1539,7 @@ function grants(g){
   }
   return g;
 }
-function fresh(scope,t){return {version:1,base:rolling.fresh(scope,t),totalReserved:0,grantSequence:0,uses:[]};}
+function fresh(scope,t,limit=100){return {version:1,base:rolling.fresh(scope,t,limit),totalReserved:0,grantSequence:0,uses:[]};}
 function validate(s){
   if(!s||s.version!==1||!integer(s.totalReserved)||!integer(s.grantSequence)||!Array.isArray(s.uses)||s.uses.length>8)
     throw Error('invalid_allowance');
@@ -1519,7 +1597,8 @@ function validateBinding(b,validate){
     (b.durationMs===null)!==(b.expiresMs===null)||b.mode==='diagnostic')throw Error('invalid_continuous_binding');
   const normalized={...b,profile:'long-v1',durationMs:b.durationMs??86400000,
     expiresMs:b.expiresMs??b.notBeforeMs+86400000,maxAttempts:b.maxAttempts??(b.mode==='observe'?0:100)};
-  delete normalized.budgetScope;delete normalized.engineRecovery;
+  delete normalized.budgetScope;delete normalized.engineRecovery;delete normalized.baseLimit;
+  if('baseLimit' in b&&![100,200].includes(b.baseLimit))throw Error('invalid_base_limit');
   if('engineRecovery' in b&&!['auto','pause'].includes(b.engineRecovery))throw Error('invalid_engine_recovery');
   validate(normalized);return b;
 }
@@ -1529,10 +1608,15 @@ function fresh(b,parent,t){
     if(c.scope!==b.budgetScope||c.target!==b.host||c.device!==b.deviceName||
       c.faultLocked||!parent.terminal)throw Error('continuous_budget_locked_or_scope_changed');
     allowance.validate(c.allowance);
-    return {...JSON.parse(JSON.stringify(c)),actionsDropped:0,actionGcThrough:0,inheritedActionAt:parent.pipeline.own.actionAt,runBaseTotal:c.allowance.totalReserved};
+    const next=JSON.parse(JSON.stringify(c));
+    if(b.baseLimit!==undefined){
+      if(b.baseLimit<c.allowance.base.limit)throw Error('base_limit_decrease_requires_review');
+      next.allowance.base.limit=b.baseLimit;allowance.validate(next.allowance);
+    }
+    return {...next,actionsDropped:0,actionGcThrough:0,inheritedActionAt:parent.pipeline.own.actionAt,runBaseTotal:c.allowance.totalReserved};
   }
   return {version:1,scope:b.budgetScope,target:b.host,device:b.deviceName,
-    allowance:allowance.fresh(b.budgetScope,t),runBaseTotal:0,actionsDropped:0,
+    allowance:allowance.fresh(b.budgetScope,t,b.baseLimit??100),runBaseTotal:0,actionsDropped:0,
     actionGcThrough:0,inheritedActionAt:null,ownerGcThrough:parent?.generation??-1,faultLocked:false};
 }
 function validateState(c,b){
@@ -1540,7 +1624,7 @@ function validateState(c,b){
     typeof c.faultLocked!=='boolean'||!['runBaseTotal','actionsDropped','actionGcThrough'].every(k=>integer(c[k]))||
     !(c.ownerGcThrough===-1||integer(c.ownerGcThrough))||c.actionGcThrough>c.actionsDropped||
     !(c.inheritedActionAt===null||Number.isFinite(c.inheritedActionAt)&&c.inheritedActionAt>=0)||
-    c.allowance?.base?.scope!==c.scope)throw Error('invalid_continuous_ledger');
+    c.allowance?.base?.scope!==c.scope||(b.baseLimit!==undefined&&c.allowance?.base?.limit!==b.baseLimit))throw Error('invalid_continuous_ledger');
   allowance.validate(c.allowance);return c;
 }
 function pruneActions(s){
@@ -1577,6 +1661,8 @@ const ownership=require('./ownership');
 const snapshots=require('./snapshot');
 const evidence=require('./long-evidence');
 const diagnostics=require('./diagnostics');
+const samplingEvidence=require('./sampling-evidence');
+const {FAST,WAIT,ABSENT}=require('../policy/wait-sampling');
 const continuous=require('./continuous'),allowance=require('./allowance');
 const {explain}=require('../policy/decision-evidence');
 const schedule=require('./schedule');
@@ -1619,6 +1705,14 @@ function compact(f){const p=f.point;return [Math.round(f.time_s*1000),f.read_ms,
   f.targets.map(r=>[r.id,r.inBytes])];}
 function validateHandoff(s,b){
   if(s.diagnostics)diagnostics.validate(s.diagnostics);
+  if(s.samplingEvidence)samplingEvidence.validate(s.samplingEvidence,s.samples);
+  if(s.samplingCounts){const c=s.samplingCounts;
+    if(s.samplingWaitPeriodMs!==WAIT||Object.keys(c).sort().join()!=='absent,baselineSamples,fast,waiting'||
+      !Object.values(c).every(integer)||Object.values(c).reduce((n,x)=>n+x,0)!==s.samples)
+      throw Error('invalid_sampling_counts');}
+  if(s.samplingEvidence){const e=s.samplingEvidence,c=s.samplingCounts;
+    if(!c||c.baselineSamples!==e.baselineSamples||['fast','waiting','absent'].some((k,i)=>c[k]!==e.totals[i]+e.totals[i+3]))
+      throw Error('sampling_evidence_ledger_mismatch');}
   if(s.surgeBuild){
     const v=s.surgeBuild,build=x=>typeof x==='string'&&/^[1-9][0-9]{0,9}$/.test(x);
     if(!build(v.baseline)||!build(v.current)||v.baseline!==b.expectedBuild||Number(v.current)<Number(v.baseline)||
@@ -1634,12 +1728,18 @@ function validateHandoff(s,b){
     if(s.continuous.allowance.totalReserved-s.continuous.runBaseTotal!==s.attemptsReserved)throw Error('allowance_action_mismatch');}
   if(s.version!==1||!['samples','candidates','eligible','attemptsReserved','invocations','sessions'].every(k=>integer(s[k]))||
     (b.maxAttempts!==null&&s.attemptsReserved>b.maxAttempts)||s.invocations>s.attemptsReserved||!Array.isArray(s.actions)||
-    s.actions.length+(cont?s.continuous.actionsDropped:0)!==s.attemptsReserved||!Array.isArray(s.recent)||s.recent.length>64||
+    s.actions.length+(cont?s.continuous.actionsDropped:0)!==s.invocations||!Array.isArray(s.recent)||s.recent.length>64||
     !Array.isArray(s.events)||s.events.length>96||!Array.isArray(s.sessionHistory)||
     s.sessionHistory.length+(s.sessionHistoryDropped||0)!==s.sessions||
     !integer(s.runStartedMs)||!integer(s.updatedMs)||s.updatedMs<s.runStartedMs||
     !(s.originMs===null||integer(s.originMs))||!(s.actionsDisabled===null||s.actionsDisabled==='operator_observe'))
     throw Error('invalid_handoff_ledger');
+  const cancelled=s.cancelledReservations??0,cancellations=s.dispatchCancellations??[];
+  if(!integer(cancelled)||s.invocations+cancelled!==s.attemptsReserved||
+    !Array.isArray(cancellations)||cancellations.length!==Math.min(cancelled,16)||
+    cancellations.some((a,i)=>a.sequence!==cancelled-cancellations.length+i+1||!integer(a.reservedMs)||
+      !integer(a.cancelledMs)||a.cancelledMs<a.reservedMs||a.cancelledMs>s.updatedMs||a.dispatched!==false||
+      typeof a.reason!=='string'||!/^[a-z_]{1,80}$/.test(a.reason)))throw Error('invalid_dispatch_cancellations');
   if(b.profile==='long-v1'||cont){
     evidence.validate(s.longEvidence);
     if(!s.pipeline.review||!integer(s.sessionHistoryDropped)||s.sessionHistory.length>16)
@@ -1664,7 +1764,7 @@ function validateHandoff(s,b){
   }
 }
 function start(o){
-  const b=o.binding,cont=b?.profile==='continuous-v1';let ended=false,owned=null,state=null,pipeline=null,pending=null,token=0,lastClock=null;
+  const b=o.binding,cont=b?.profile==='continuous-v1';let ended=false,owned=null,state=null,pipeline=null,pending=null,token=0,lastClock=null,reservedPending=null;
   const done=(reason,extra={})=>o.done({reason,...extra});
   if(!b||b.enabled!==true){done('disabled');return;}
   validate(b);
@@ -1755,7 +1855,9 @@ function start(o){
   },recovering?begin:null);
   if(!claim.accepted){done(claim.reason);return;}
   owned=claim.header;state=claim.state;
-  if(cont&&!state.samplingCounts)state.samplingCounts={baselineSamples:state.samples,fast:0,waiting:0,absent:0};
+  if(cont&&!state.samplingCounts){state.samplingCounts={baselineSamples:state.samples,fast:0,waiting:0,absent:0};
+    state.samplingWaitPeriodMs=WAIT;}
+  const samplingLog=cont?new samplingEvidence.SamplingEvidence(state):null;
   if(actualBuild!==null){
     if(!state.surgeBuild)state.surgeBuild={baseline:b.expectedBuild,current:previousBuild,changes:0,history:[]};
     if(buildChanged){
@@ -1784,15 +1886,20 @@ function start(o){
     state.pipeline=snapshots.capture(pipeline);state.updatedMs=now();
     if(state.longEvidence){
       for(const a of state.actions)if(!a.__sealedExcerpt)evidence.boundAction(a);
-      state.longEvidence.maxSavedBytes=Math.max(state.longEvidence.maxSavedBytes,byteLength(JSON.stringify(state))+16);
     }
-    const raw=encode(state);if(byteLength(raw)>MAX_STATE)throw Error('evidence_capacity');
+    const raw=encode(state),savedBytes=byteLength(raw);if(savedBytes>MAX_STATE)throw Error('evidence_capacity');
+    // Do not stringify the hydrated history a second time in the dispatch path.
+    // This explicit field measures the stored root only; legacy maxSavedBytes
+    // remains historical and must not be reinterpreted as heap or total storage.
+    if(state.longEvidence)state.longEvidence.maxRootBytes=Math.max(state.longEvidence.maxRootBytes??0,savedBytes);
     const k=ownership.key(state.generation,'state');
     if(store.write(k,raw)!==true||store.read(k)!==raw)throw Error('state_write_failed');
     lastPersistedMs=state.updatedMs;
   }
   function finish(reason,handoff=false){
     if(ended)return;ended=true;token++;pending=null;
+    if(reservedPending)cancelReservation('session_ended',false);
+    samplingLog?.close('session_boundary',o.now());
     state.closed=true;state.terminal=!handoff;state.reason=reason;state.phase=handoff?'handoff':'ended';
     state.endedMs=o.now();state.sessionHistory.push({sessionId:o.sessionId,start:sessionStart,end:state.endedMs,reason});
     if(state.longEvidence&&state.sessionHistory.length>16){state.sessionHistory.shift();state.sessionHistoryDropped++;}
@@ -1853,21 +1960,41 @@ function start(o){
       !f.startup.startup_permits_retry||!f.rearm.retry_allowed)return {row:null,reason:'diagnostic_waiting_exact_active_main'};
     return {row:r,reason:'explicit_single_diagnostic_not_low_speed'};
   }
-  function action(f,d,first){
-    if(!mayAct())return false;
-    const before=[];for(const r of state.recent)if(!before.length||r[0]-before.at(-1)[0]>=190)before.push(r);
-    const a={sequence:state.attemptsReserved+1,connection:{...d.row},pre_action_targets:f.targets,
-      reservedMs:now(),startedMs:null,completedMs:null,status:'reserved_unknown',kind:b.mode,
-      decision:{point:f.point,startup:f.startup,rearm:f.rearm,reason:d.reason,
-        explanation:explain(pipeline,f,d,first)},before:before.slice(-33),
-      followup:[],followupEndMs:null,effectConfirmedMs:null,firstThresholdMs:null,successors:[]};
-    if(cont){const reservation=allowance.reserve(state.continuous.allowance,now());
-      if(!reservation.allowed)return false;state.continuous.allowance=reservation.next;a.allowance=reservation.source;}
-    state.actions.push(a);state.attemptsReserved++;event('action_reserved',{sequence:a.sequence});persist();
+  function cancelReservation(reason,save=true){
+    if(!reservedPending)return;
+    const a=reservedPending.a,t=save?now():Math.max(o.now(),lastClock??0,reservedPending.a.reservedMs);
+    if(a.startedMs!==null||a.completedMs!==null||state.actions.at(-1)!==a)throw Error('cannot_cancel_dispatched_action');
+    // Keep the consumed reservation and its monotonic quota sequence. No refund
+    // or replay of an unknown dispatch. Only this live owner can prove no call.
+    state.actions.pop();state.cancelledReservations=(state.cancelledReservations??0)+1;
+    if(!state.dispatchCancellations)state.dispatchCancellations=[];
+    state.dispatchCancellations.push({sequence:state.cancelledReservations,reservedMs:a.reservedMs,cancelledMs:t,
+      reason,dispatched:false,allowance:a.allowance??null});
+    if(state.dispatchCancellations.length>16)state.dispatchCancellations.shift();
+    event('dispatch_cancelled',{reason});reservedPending=null;pending=null;
+    if(save)persist();
+  }
+  function dispatchReserved(f,d,first){
+    const a=reservedPending.a;
+    const revised=reservedPending.rechecks>0?{point:f.point,startup:f.startup,rearm:f.rearm,reason:d.reason,explanation:explain(pipeline,f,d,first)}:null;
     const allowed=mayAct(true),t=now();
-    if(!allowed||(a.allowance?.kind==='grant'&&t>=a.allowance.expiresMs)||t>=sessionDeadline||t>=expiry||t-f.received_ms<0||t-f.received_ms>250){finish('reserved_dispatch_cancelled');return true;}
+    if(!allowed||(a.allowance?.kind==='grant'&&t>=a.allowance.expiresMs)||t>=sessionDeadline||t>=expiry){
+      cancelReservation('admission_changed');later(tick,100);return;}
+    if(t-f.received_ms<0)throw Error('clock_discontinuity');
+    if(t-f.received_ms>250){
+      if(reservedPending.rechecks>=1){cancelReservation('fresh_measurement_unavailable');later(tick,100);return;}
+      reservedPending.rechecks++;event('dispatch_refresh_required',{measurementAgeMs:t-f.received_ms});
+      pending=null;later(tick,1);return;
+    }
+    a.dispatchEvidence={receivedMs:f.received_ms,measurementAgeMs:t-f.received_ms,
+      refreshed:reservedPending.rechecks>0,reservationToDispatchMs:t-a.reservedMs};
+    if(reservedPending.rechecks>0){
+      a.decision=revised;
+      a.before.push(compact(f));a.before=a.before.slice(-33);
+    }
     const prev=state.actions.at(-2);if(prev)prev.followupEndMs=t;
-    a.startedMs=t;state.invocations++;pipeline.afterAction(a,t);pending=null;
+    a.startedMs=t;state.invocations++;reservedPending=null;
+    samplingLog?.close('action',t);pipeline.afterAction(a,t);pending=null;
     const generation=++token;let replied=false;
     later(()=>{if(!replied&&generation===token)finish('kill_result_unknown_no_retry');},1000);
     try{o.api('POST','/v1/requests/kill',{id:d.row.id},reply=>guard(()=>{
@@ -1875,10 +2002,28 @@ function start(o){
       if(!reply||typeof reply!=='object'||Array.isArray(reply)||reply.error){finish('kill_reply_unknown_no_retry');return;}
       a.status='reply_received_effect_unverified';event('kill_reply',{sequence:a.sequence});persist();later(tick,100);
     }));}catch(_){finish('kill_exception_unknown_no_retry');}
+  }
+  function action(f,d,first){
+    if(!mayAct())return false;
+    const before=[];for(const r of state.recent)if(!before.length||r[0]-before.at(-1)[0]>=190)before.push(r);
+    const a={sequence:state.invocations+1,connection:{...d.row},pre_action_targets:f.targets,
+      reservedMs:now(),startedMs:null,completedMs:null,status:'reserved_unknown',kind:b.mode,
+      decision:{point:f.point,startup:f.startup,rearm:f.rearm,reason:d.reason,
+        explanation:explain(pipeline,f,d,first)},before:before.slice(-33),
+      followup:[],followupEndMs:null,effectConfirmedMs:null,firstThresholdMs:null,successors:[]};
+    if(cont){const reservation=allowance.reserve(state.continuous.allowance,now());
+      if(!reservation.allowed)return false;state.continuous.allowance=reservation.next;a.allowance=reservation.source;}
+    state.actions.push(a);state.attemptsReserved++;event('action_reserved',{sequence:a.sequence});persist();
+    // Set this only AFTER durable confirmation. Failed/unknown writes remain
+    // reserved_unknown and can never enter the proven-no-dispatch path.
+    reservedPending={a,first:{row:d.row,reason:d.reason,receivedMs:f.received_ms},rechecks:0};
+    dispatchReserved(f,d,first);
     return true;
   }
   function readFailure(reason){
+    if(reservedPending)cancelReservation('refresh_read_failed');
     pipeline.sampling?.lost();
+    samplingLog?.close('read_failure',now());
     pending=null;state.readFailures=(state.readFailures||0)+1;state.readErrors=(state.readErrors||0)+1;
     state.lastFault=reason;event('read_failed',{reason,consecutive:state.readFailures});
     diagnostics.fault(state.diagnostics,'read_failure',state,now(),reason,{lastCheckpointMs:lastPersistedMs});
@@ -1921,7 +2066,8 @@ function start(o){
       state.lastSuccessfulReadMs=end;
       state.samples++;state.maxReadMs=Math.max(state.maxReadMs,f.read_ms);
       if(cont){const priorPeriod=f.sampling.periodMs;
-        state.samplingCounts[priorPeriod===100?'fast':priorPeriod===200?'waiting':'absent']++;}
+        const cadence=priorPeriod===FAST?'fast':priorPeriod===WAIT?'waiting':priorPeriod===ABSENT?'absent':null;
+        if(cadence===null)throw Error('unknown_sampling_cadence');state.samplingCounts[cadence]++;}
       if(state.lastSampleMs!==null)state.maxIntervalMs=Math.max(state.maxIntervalMs,f.time_s*1000-state.lastSampleMs);
       state.lastSampleMs=f.time_s*1000;state.states[f.point.state]=(state.states[f.point.state]||0)+1;
       if(f.point.candidate)state.candidates++;
@@ -1929,7 +2075,15 @@ function start(o){
       state.phase=phase(end);state.lastTargetCount=f.targets.length;state.lastTrafficState=f.point.state;record(f);
       const d=b.mode==='diagnostic'?diagnostic(f):pipeline.consider(f);
       state.gateReasons[d.reason]=(state.gateReasons[d.reason]||0)+1;if(d.row)state.eligible++;
+      samplingLog?.observe(f,d);
       if(state.longEvidence)evidence.observe(state,f,d,compact(f),pipeline);
+      if(reservedPending){
+        const first=reservedPending.first;
+        const fresh=b.mode==='diagnostic'?(d.row&&fingerprint(first.row)===fingerprint(d.row)&&d.row.inBytes>first.row.inBytes?d:{row:null}):pipeline.revalidate(first,f,now());
+        if(fresh.row)dispatchReserved(f,fresh,first);
+        else {cancelReservation('refresh_no_longer_eligible');later(tick,100);}
+        return;
+      }
       if(d.row&&mayAct()){
         if(pending){
           const first=pending;
@@ -1941,6 +2095,7 @@ function start(o){
       // Continuous-only stable-WAIT optimization. Revalidation and all recovery
       // stay fast; legacy finite profiles retain their original cadence.
       const period=pipeline.sampling?pipeline.sampling.next(f,pipeline,pending):f.targets.length?100:1000;
+      samplingLog?.planned(period,end);
       if(end>=nextCheckpoint){persist();nextCheckpoint=end+schedule.checkpointMs;}
       later(tick,Math.min(Math.max(1,t+period-now()),Math.max(1,sessionDeadline-now())));
     }));}catch(_){if(!replied&&generation===token){replied=true;token++;readFailure('read_exception');}}
@@ -1970,9 +2125,10 @@ const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const id=x=>typeof x==='string'&&/^[a-z0-9-]{16,64}$/.test(x);
 function validateService(s){
-  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':'')+(s&&'budgetScope' in s?',budgetScope':'')+(s&&'engineRecovery' in s?',engineRecovery':''))||
+  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':'')+(s&&'budgetScope' in s?',budgetScope':'')+(s&&'engineRecovery' in s?',engineRecovery':'')+(s&&'baseLimit' in s?',baseLimit':''))||
     ('layout' in s&&!['single-worker-v1','diagnostic-pair-v1'].includes(s.layout))||
     ('budgetScope' in s&&(!id(s.budgetScope)||s.layout!=='single-worker-v1'))||
+    ('baseLimit' in s&&(!s.budgetScope||![100,200].includes(s.baseLimit)))||
     ('engineRecovery' in s&&(!s.budgetScope||!['auto','pause'].includes(s.engineRecovery)))||s.protocol!==2||!id(s.installationId)||
     typeof s.host!=='string'||s.host.length>253||!s.host.includes('.')||
     !s.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
@@ -2009,10 +2165,17 @@ function validateTask(t){
 function bindingFor(s,t,now){
   const end=t.durationMs===null?null:now+t.waitTargetMs+t.durationMs;
   return {enabled:true,runId:t.runId,mode:t.kind==='execute'?'execute':'observe',host:s.host,deviceName:s.deviceName,
-    ...(t.profile?{profile:t.profile}:{}),...(t.profile==='continuous-v1'?{budgetScope:s.budgetScope,...(s.engineRecovery?{engineRecovery:s.engineRecovery}:{})}:{}),
+    ...(t.profile?{profile:t.profile}:{}),...(t.profile==='continuous-v1'?{budgetScope:s.budgetScope,...(s.baseLimit!==undefined?{baseLimit:s.baseLimit}:{}),...(s.engineRecovery?{engineRecovery:s.engineRecovery}:{})}:{}),
     expectedBuild:s.expectedBuild,expectedModel:s.expectedModel,notBeforeMs:now,
     latestStartMs:Math.min(now+PERIOD,end===null?Number.MAX_SAFE_INTEGER:end-1),expiresMs:end,durationMs:t.durationMs,
     waitTargetMs:t.waitTargetMs,referenceMs:t.referenceMs??0,tailMs:t.tailMs??0,maxAttempts:t.kind==='execute'?t.maxAttempts:0,diagnostic:null};
+}
+function ledgerService(s,j){
+  // Closed historical jobs retain their original authorized base limit.
+  if(j.phase!=='finished'||j.task.profile!=='continuous-v1')return s;
+  const old=j.binding?.baseLimit;
+  if((old??100)>(s.baseLimit??100))throw Error('historical_base_limit_exceeds_service');
+  const prior={...s};delete prior.baseLimit;if(old!==undefined)prior.baseLimit=old;return prior;
 }
 function validateLedger(state,s){
   if(s.budgetScope){allowance.grants(state.grants);if(!integer(state.runSequence))throw Error('invalid_run_sequence');}
@@ -2031,7 +2194,7 @@ function validateLedger(state,s){
       j.startByMs!==j.notBeforeMs+j.task.startGraceMs)throw Error('invalid_job_ledger');
     ids.add(j.task.runId);
     if(j.binding!==null&&(!integer(j.startedMs)||j.task.kind==='probe'||
-      canonical(j.binding)!==canonical(bindingFor(s,j.task,j.startedMs))))throw Error('invalid_saved_binding');
+      canonical(j.binding)!==canonical(bindingFor(ledgerService(s,j),j.task,j.startedMs))))throw Error('invalid_saved_binding');
     if(['pending','expired'].includes(j.phase)&&(j.binding!==null||j.probeAtMs!==null))throw Error('invalid_pending_job');
     if(['running','stopping','finished'].includes(j.phase)&&
       (!integer(j.startedMs)||j.startedMs<j.notBeforeMs||j.startedMs>j.startByMs||
@@ -2053,7 +2216,8 @@ function context(s,o){
     const h=owner.head(store);
     const previous=h.state?JSON.parse(h.state.service):null;
     const upgrade=!!(s.budgetScope&&previous?.budgetScope===s.budgetScope&&
-      canonical({...previous,installationId:s.installationId})===canonical(s)&&
+      (s.baseLimit??100)>=(previous.baseLimit??100)&&
+      canonical({...previous,installationId:s.installationId,...('baseLimit' in s?{baseLimit:s.baseLimit}:{})})===canonical(s)&&
       (!h.state.current||['finished','cancelled','expired'].includes(h.state.current.phase)));
     if(h.state&&((!upgrade&&(h.state.codeId!==o.codeId||h.state.service!==canonical(s)))||!integer(h.state.clockMs)||
       o.now()<h.state.clockMs))throw Error('job_service_or_clock_changed');
@@ -2167,7 +2331,7 @@ function compactCompleted(s,o){
     const active=owner.head({read:o.read},false);
     if(active.state?.generation===old.generation)throw Error('cannot_retire_current_head');
     if(old.evidenceRetired!==true){
-    const summary={evidenceRetired:true,...(old.continuous?{continuous:{scope:old.continuous.scope},retiredPageRange:[(old.continuous.actionGcThrough||0)+1,old.attemptsReserved]}:{})};
+    const summary={evidenceRetired:true,...(old.continuous?{continuous:{scope:old.continuous.scope},retiredPageRange:[(old.continuous.actionGcThrough||0)+1,(old.cancelledReservations===undefined?old.attemptsReserved:old.invocations)]}:{})};
     for(const key of ['version','generation','runId','codeId','binding','closed','terminal','reason','originMs',
       'samples','sessions','invocations','attemptsReserved','updatedMs'])summary[key]=old[key];
     const raw=JSON.stringify(summary);
@@ -2176,7 +2340,7 @@ function compactCompleted(s,o){
     }
     // A crash after index commit must not permanently skip page reclamation.
     // Index now refers to a summary; remove only this retired run's bounded pages.
-    const range=old.retiredPageRange??(old.continuous?[(old.continuous.actionGcThrough||0)+1,old.attemptsReserved]:[1,schedule.longMaxAttempts]);
+    const range=old.retiredPageRange??(old.continuous?[(old.continuous.actionGcThrough||0)+1,(old.cancelledReservations===undefined?old.attemptsReserved:old.invocations)]:[1,schedule.longMaxAttempts]);
     for(let i=range[0];i<=range[1];i++){const k=owner.pageKey(old.runId,i);
       if(o.read(k)!==null&&(o.write(null,k)!==true||o.read(k)!==null))throw Error('evidence_retention_failed');}
   }
@@ -2217,7 +2381,7 @@ function submit(s,o,t,replaces=null){
         const retired=prior.history[0],raw=retired.resultKey?o.read(retired.resultKey):null,r=raw?owner.parse(raw):null;
         state.retireJob={runId:retired.task.runId,resultKey:retired.resultKey??null,
           generation:r?.generation??null,fromAction:r?.retiredPageRange?.[0]??(r?.continuous?.actionGcThrough??0)+1,
-          toAction:r?.retiredPageRange?.[1]??r?.attemptsReserved??0};
+          toAction:r?.retiredPageRange?.[1]??(r?.cancelledReservations===undefined?r?.attemptsReserved:r?.invocations)??0};
       }
     }else if(replaces!==null)throw Error('replacement_job_missing');
     state.current={task:copy(t),receivedMs:now,notBeforeMs:now+t.delayMs,startByMs:now+t.delayMs+t.startGraceMs,
@@ -2321,6 +2485,7 @@ function control(q,o){
     if(q.operation==='status'&&result.runtime){const r=result.runtime;
       result.runtime={runId:r.runId,closed:r.closed,terminal:r.terminal,reason:r.reason,samples:r.samples,
         sessions:r.sessions,originMs:r.originMs,invocations:r.invocations,attemptsReserved:r.attemptsReserved,
+        cancelledReservations:r.cancelledReservations??0,lastDispatchCancellation:r.dispatchCancellations?.at(-1)??null,
         updatedMs:r.updatedMs,...(r.continuous?.allowance?{allowance:allowance.view(r.continuous.allowance,o.now()),faultLocked:r.continuous.faultLocked}:{}),
         ...(r.evidenceRetired?{evidenceRetired:true}:{})};}
   }
