@@ -1,8 +1,16 @@
-# TEST VERSION: configurable isolated targets with bounded host globs
+# TEST VERSION: independent productive-download eligibility
 
-Independent test release, superseding the undeployed exact-host candidate 0f52dc34505244cf57fb0913c607ec4038f5a3b4. Stable main remains 62537e48c6f4b04c9f13bd221160bb765210fa53. Publication does not deploy a configuration or start a task. Select this version by its full fixed commit URL.
+Fixes an existing ordinary slow-download veto when a connection already present before a retry later becomes the main download. Independent test release after 443dcd23accbf00bc8903bbb508c228ea52445be. Stable main remains 62537e48c6f4b04c9f13bd221160bb765210fa53. Use the full fixed commit URL. Publication does not deploy or start a task.
 
-Build identity: ae56628510906021886abe3c583a61941eb197453c072594f1c3ad138c866886. Offline verification: 503 checks, 13,704 historical frames with exact default-policy parity, compiled entry-point simulations, and native profile syntax checks passed. Real TV deployment and effects of this release are not yet verified.
+Build identity: 07286577a4f65d04778e634987b14c6f4e27d7bb81ea578fd16019cb13f7cb88. Offline verification: 515 checks, including 12 new regression cases, compiled package tests, native profile syntax, and 13,704 historical frames / 402 snapshot restores with exact old-profile parity. The historical traces lack this concurrent-peer case; the new regression explicitly reproduces the old veto and requires the fixed behavior. TV application and real playback effects of this release remain unverified.
+
+## Fix and preserved protections
+
+Ordinary productive slow downloads qualify using their own fresh evidence, without requiring attribution as a newly created successor of the previous action. Pre-existing same-endpoint peers can become eligible after the original protections expire. Successor attribution remains for outcome evidence; the narrowly bounded stalled-own-successor rescue keeps its existing independent lineage requirements and one-rescue limit. Evidence labels explicitly say replacement.requiredForProductiveDownload=false.
+
+Speed thresholds, real-growth and unique-main requirements, reliable-read limits, natural four-second startup, fixed five-second own-action protection, ordinary WAIT protection, recovery observations, final same-identity/new-growth revalidation, global spacing, rolling quota, charged reservations/cancellations and unknown-action fault locks remain. No quota reset, supplemental allowance, new speed-test downloads, host expansion or Apple segmented-playback policy is introduced.
+
+The same veto is present in verified frozen pre-Apple versions a46ef915 and stable 62537e48, as well as 0c96849a and the earlier read-only f111e3bd. This fixes a pre-existing pipeline defect; it was not introduced by bounded Apple host globs.
 
 ## Changes
 
@@ -13,14 +21,8 @@ Build identity: ae56628510906021886abe3c583a61941eb197453c072594f1c3ad138c866886
 - Explicit scopes replace build-time source-string substitutions. Public JavaScript contains no installed target names, device names or credentials. Each action records targetId; excerpts stay scoped to their target. Aggregate bytes and selected-target rates are labeled separately.
 - Snapshots persist all target policies and the last action state. Closed-installation upgrades preserve the budget scope, existing consumption and action clocks. Threshold changes rebuild measurement evidence. Removing the most recently acted-on endpoint currently requires explicit protection-state migration and is refused automatically.
 
-## Offline load evidence
-
-Synthetic counter streams and virtual clocks, with an in-memory store, were used for comparison. In a 24-hour intermittent-download model, single and dual targets each made 362,881 connection reads and 6,482 root writes. Maximum stored root sizes were 121,943 and 139,625 bytes respectively, below the unchanged 524,288-byte bound. A separate two-target one-hour action model exercised the 200-slot allowance and retained at most 100 recent actions.
-
-Host Node.js timing and storage API payload sizes are not Apple TV JavaScriptCore CPU, JS heap, physical disk I/O, energy or playback measurements. There is no test-file download for speed measurement. A public Apple playback manifest provides evidence for several VOD pathway hostnames. Live content needs and causal benefit from retrying still require separate evidence. This release changes host matching, without adding a segmented-playback interruption policy.
-
 ## Upgrade boundaries
 
-Use a new fixed installation only after the previous task is confirmed terminal. Preserve its budgetScope and existing baseLimit, consumption and last action time. Existing frozen control bundles remain usable for their own deployments. Never replace an immutable released bundle with a candidate.
+Use a new fixed installation after the old task is independently confirmed closed and terminal. Preserve the stable budget scope, base limit, consumption, grants and action clocks. Snapshots and quota formats remain compatible; original released bundles are immutable. Accept source staging, TV declarations, resource readiness, task admission, autonomous runtime, actual interruption and playback benefit as separate evidence.
 
-Accept installation declarations, resource readiness, task admission, autonomous runtime, actual action effects and playback benefit as separate evidence. No route/proxy change, engine restart or blanket connection kill is part of this release.
+One worker still reads existing connection byte counters once per cycle. There is no separate speed-test script or test-file traffic. No proxy/route changes, engine restart or blanket connection kill is part of this release. This eligibility correction may allow ordinary slow connections that the old defect skipped; the original action interval and quota still limit retries. CPU, power and causal throughput benefits require real-device evidence.

@@ -1,4 +1,4 @@
-// Version ae56628510906021886abe3c583a61941eb197453c072594f1c3ad138c866886; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
+// Version 07286577a4f65d04778e634987b14c6f4e27d7bb81ea578fd16019cb13f7cb88; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="ae56628510906021886abe3c583a61941eb197453c072594f1c3ad138c866886";
+const __codeId="07286577a4f65d04778e634987b14c6f4e27d7bb81ea578fd16019cb13f7cb88";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/target-scope"]=function(module,exports,require){
 'use strict';
@@ -479,7 +479,7 @@ __factories["src/core/runner"]=function(module,exports,require){
 };
 __factories["src/policy/retry-rearm-policy"]=function(module,exports,require){
 // Offline candidate only. No controller, network, authorization or action I/O.
-// A fixed window follows our own action. The original detector, successor
+// A fixed window follows our own action. The original detector, connection
 // identity check and final revalidation remain necessary for any real action.
 'use strict';
 const DEFAULTS=Object.freeze({observation_s:5,maximum_gap_s:.5,maximum_read_ms:250,slow_Bps:2000000});
@@ -765,7 +765,8 @@ function explain(pipeline,f,d,first=null){
    entryAtS:s.entryAt,entryRemainingS:remaining(s.entryAt===null?null:s.entryAt+4,f.time_s),
    ownActionAtS:s.actionAt,quietAtS:s.quietAt,started:s.started,resumed:s.resumed,
    disarmed:s.disarmed,rescuesUsed:s.rescues,progressSeconds:s.progressSeconds,progressBytes:s.progressBytes}:null,
-  replacement:replacement?{absentReads:replacement.absent,allowedForSelected:main?replacement.allows(main):null}:null,
+  replacement:replacement?{absentReads:replacement.absent,allowedForSelected:main?replacement.allows(main):null,
+   requiredForProductiveDownload:false}:null,
   revalidation:first?{firstReceivedMs:first.receivedMs,firstReason:first.reason,
    intervalMs:f.received_ms-first.receivedMs,sameIdentity:!!main&&fp(main)===fp(first.row),
    addedBytes:main?main.inBytes-first.row.inBytes:null}:null};
@@ -1002,7 +1003,9 @@ class Pipeline{
     if(!decision.row)return rescue||decision;
     if(!frame.rearm.retry_allowed)return {row:null,reason:frame.rearm.reason};
     if(!frame.startup.startup_permits_retry)return {row:null,reason:frame.startup.reason};
-    if(this.replacement&&!this.replacement.allows(decision.row))return {row:null,reason:'replacement_not_confirmed'};
+    // Productive downloads qualify on their own fresh evidence. A peer that
+    // existed before our action can become the main download; lineage is only
+    // for successor attribution and the separate, tightly bounded stall rescue.
     return this.review?this.review.filter(frame,decision):decision;
   }
   revalidate(first,last,nowMs){
