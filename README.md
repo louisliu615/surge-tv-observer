@@ -1,28 +1,26 @@
-# TEST VERSION: adaptive-wait-4hz-dispatch-fix
+# TEST VERSION: configurable isolated target policies
 
-This is an independent test release. The stable `main` branch remains at `62537e48c6f4b04c9f13bd221160bb765210fa53`. The prior test `22074736` remains immutable. Publication does not deploy a configuration or start a task. Use the full fixed commit URL.
+Independent test release, based on a46ef9156f5164b67ec00917e2d9be4b70b2f626. Stable main remains 62537e48c6f4b04c9f13bd221160bb765210fa53. Publication does not deploy a configuration or start a task. Select this version by its full fixed commit URL.
 
-Build identity: `910a0ca5b273d16d9377b7b25eedb7fd031bbc205149d37b8536139971926de1`. Offline verification: 467 checks passed, including real fault-state replay, 200-slot migration, clock advancement within synchronous callbacks, unknown-result guards, bounded storage, and 13,704 historical frames. TV deployment and this version's runtime behavior are not yet verified.
+Build identity: 09f12ff12f32166f2112372d740fb9a541b91cdac6fe39cbb616f034f32bdf5e. Offline verification: 488 checks, 13,704 historical frames with exact default-policy parity, compiled entry-point simulations, and native profile syntax checks passed. Real TV deployment and effects of this release are not yet verified.
 
 ## Changes
 
-- A durable action reservation can make its measurement stale. The worker now takes at most one fresh read and revalidates the same eligible connection before dispatch. The 250 ms freshness rule is unchanged. If no longer eligible, it records a proven non-dispatch cancellation and continues observing. Failed/unknown persistence, lost ownership, interrupted pending actions and unknown action replies still stop safely.
-- Reserved attempts remain charged even when a known non-dispatch is cancelled. Actual invocations have separate sequential records. The most recent 16 cancellations are retained; no refunds, task resets or implicit unlocks.
-- Removed duplicate serialization of the fully expanded action history from the persistence path. `maxRootBytes` explicitly measures the stored root at a preceding checkpoint; historical `maxSavedBytes` is not a heap or database measurement.
-- Strict, stable WAIT uses 250 ms (4 Hz), compared with the prior test's 200 ms (5 Hz). Download, startup, uncertainty, post-action recovery and final validation remain fast (100 ms). No target remains 1000 ms. WAIT is a counter-derived traffic state, not proof of a full player buffer.
-- Added bounded sampling evidence: target presence by cadence totals, 288 five-minute bins and 32 growth-resumption excerpts. Existing checkpoint timing and local-only storage are retained. No external telemetry, extra scheduler or always-on computer collector.
-- Continuous installations may explicitly select `baseLimit: 100` or `baseLimit: 200`. The default stays 100. A closed-service upgrade preserves the budget scope, all unexpired consumption, lifetime sequence, grants and last action time; only the limit rises. Slots release individually after 24 hours, not at midnight. Raising quota never unlocks an unknown action or overrides protection.
+- One configured worker and one active-connection API read per polling cycle. Each installed exact endpoint has its own detector, speed threshold, startup/wait state, revalidation and successor evidence. Speeds and recovery lineage are never merged across endpoints.
+- Optional service.targets contains up to four unique id/host/port/slowBps rules. The first rule preserves the original installation host on port 443. Tasks cannot override targets. Without targets, the old single-target path remains available.
+- The shared rolling allowance, unknown-action fault lock and global minimum five-second action spacing remain. Adding targets never refills allowance or doubles it. Natural four-second startup, fixed five-second own-action protection and ordinary near-zero waiting protection remain.
+- Polling adopts the fastest requirement among endpoints: 100 ms for download/recovery/uncertainty, 250 ms only for strict stable waits, 1000 ms when all targets are absent. Two active endpoints share one approximately 10 Hz loop, rather than independent loops. A newly monitored endpoint can increase time spent in fast polling.
+- Explicit scopes replace build-time source-string substitutions. Public JavaScript contains no installed target names, device names or credentials. Each action records targetId; excerpts stay scoped to their target. Aggregate bytes and selected-target rates are labeled separately.
+- Snapshots persist all target policies and the last action state. Closed-installation upgrades preserve the budget scope, existing consumption and action clocks. Threshold changes rebuild measurement evidence. Removing the most recently acted-on endpoint currently requires explicit protection-state migration and is refused automatically.
 
-## Unchanged limits
+## Offline load evidence
 
-The low-rate threshold, natural startup protection, fixed post-action protection, ordinary near-zero protection and bounded own-successor rescue policy are unchanged. Single-worker, two-minute cron lifecycle and forward Surge-build handling are retained. Invalid/changed APIs still block actions. Finite profiles retain their existing per-task caps.
+Synthetic counter streams and virtual clocks, with an in-memory store, were used for comparison. In a 24-hour intermittent-download model, single and dual targets each made 362,881 connection reads and 6,482 root writes. Maximum stored root sizes were 121,943 and 139,247 bytes respectively, below the unchanged 524,288-byte bound. A separate two-target one-hour action model exercised the 200-slot allowance and retained at most 100 recent actions.
 
-The root remains bounded to 512 KiB. Action excerpts use immutable pages, keeping at most 100 recent action records; old evidence is reclaimed. This is not full continuous raw capture. Increasing rolling quota does not increase the action-page retention limit.
+Host Node.js timing and storage API payload sizes are not Apple TV JavaScriptCore CPU, JS heap, physical disk I/O, energy or playback measurements. There is no test-file download for speed measurement. The actual content type of any newly configured endpoint and causal benefit from retrying still require live evidence.
 
-## Upgrade and evidence boundaries
+## Upgrade boundaries
 
-Fixed-version deployments must be checked in layers: source staging, TV declaration, resource readiness, actual autonomous execution and measured action behavior. Existing fault locks require a separately reviewed, exact-state maintenance step where the old code proves non-dispatch; this public worker is not a general unlock tool. No private helper or fault snapshot is included here.
+Use a new fixed installation only after the previous task is confirmed terminal. Preserve its budgetScope and existing baseLimit, consumption and last action time. Existing frozen control bundles remain usable for their own deployments. Never replace an immutable released bundle with a candidate.
 
-Historical replay cannot establish future performance or causality. Poll-count savings are not CPU, power, memory or viewing-quality savings. More quota provides capacity, not a guarantee that repeated reconnects improve a slow source or route.
-
-This bundle contains no private endpoint, device binding, credentials, video addresses or configuration. It has no remote control endpoint or external log upload. Runtime parameters and task authorization are supplied separately through the existing local Surge service.
+Accept installation declarations, resource readiness, task admission, autonomous runtime, actual action effects and playback benefit as separate evidence. No route/proxy change, engine restart or blanket connection kill is part of this release.

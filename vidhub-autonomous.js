@@ -1,4 +1,4 @@
-// Version 910a0ca5b273d16d9377b7b25eedb7fd031bbc205149d37b8536139971926de1; phase: 4 Hz stable WAIT test; fresh dispatch revalidation; bounded cancellation evidence; configurable rolling quota; action-trial build; runtime acceptance pending.
+// Version 09f12ff12f32166f2112372d740fb9a541b91cdac6fe39cbb616f034f32bdf5e; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,8 +10,24 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="910a0ca5b273d16d9377b7b25eedb7fd031bbc205149d37b8536139971926de1";
+const __codeId="09f12ff12f32166f2112372d740fb9a541b91cdac6fe39cbb616f034f32bdf5e";
 const __capabilities=Object.freeze({"actionsQualified": true});
+__factories["src/core/target-scope"]=function(module,exports,require){
+'use strict';
+// Installed scopes are data. The builder does not rewrite business source.
+let installed=null;
+function validate(s){
+ if(!s||Object.keys(s).sort().join()!=='deviceName,host,port'||typeof s.host!=='string'||s.host.length>253||
+   !s.host.includes('.')||!s.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
+   !Number.isSafeInteger(s.port)||s.port<1||s.port>65535||typeof s.deviceName!=='string'||
+   !s.deviceName.length||s.deviceName.length>64)throw Error('invalid_target_scope');
+ return Object.freeze({...s});
+}
+function configure(s){installed=validate(s);}
+function defaults(){return installed??require('./local-target');}
+module.exports={validate,configure,defaults};
+
+};
 __factories["src/core/detector"]=function(module,exports,require){
 /* Pure, bounded, causal observer. No I/O and no connection-control capability. */
 (function (root, factory) {
@@ -20,7 +36,7 @@ __factories["src/core/detector"]=function(module,exports,require){
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const DEFAULTS = Object.freeze({
-    host: __binding.host, port: 443, deviceName: __binding.deviceName,
+    ...require('./target-scope').defaults(),
     activity_window_s: 0.4, activity_bytes: 16384, quiet_confirmation_s: 0.6,
     speed_window_s: 1, minimum_evidence_s: 0.4, low_confirmation_s: 0.4,
     slow_Bps: 2000000, maximum_gap_s: 0.5, maximum_read_ms: 250,
@@ -41,12 +57,13 @@ __factories["src/core/detector"]=function(module,exports,require){
     return i;
   }
   class Detector {
-    constructor(options) {
-      this.p = Object.assign({}, DEFAULTS, options || {});
+    constructor(options, scope=null) {
+      const target=scope===null?DEFAULTS:require('./target-scope').validate(scope);
+      this.p = Object.assign({}, DEFAULTS, {host:target.host,port:target.port,deviceName:target.deviceName}, options || {});
       if (Object.keys(this.p).some(k => !(k in DEFAULTS)) ||
           typeof this.p.quarantine_unreliable_intervals !== 'boolean') throw new Error('invalid_parameter');
       for (const k of ['host','port','deviceName'])
-        if (this.p[k] !== DEFAULTS[k]) throw new Error('target_scope_is_fixed');
+        if (this.p[k] !== target[k]) throw new Error('target_scope_is_fixed');
       Object.keys(DEFAULTS).forEach(k => {
         if (typeof DEFAULTS[k] === 'number' && (!finite(this.p[k]) || this.p[k] <= 0))
           throw new Error('invalid_parameter');
@@ -301,7 +318,8 @@ __factories["src/core/adapter"]=function(module,exports,require){
     const port = parts.length === 2 ? Number(parts[1]) : 443;
     return port >= 1 && port <= 65535 ? {host: parts[0].toLowerCase(), port} : null;
   }
-  function create(schema) {
+  function create(schema, scope=null) {
+    const target=scope===null?require('./target-scope').defaults():require('./target-scope').validate(scope);
     if (!schema || schema.verified !== true) throw new Error('http_schema_unverified');
     const fields = ['id','url','inBytes','local','deviceName','completed','failed'];
     if (!schema.fields || fields.some(k => !Array.isArray(schema.fields[k])))
@@ -312,13 +330,13 @@ __factories["src/core/adapter"]=function(module,exports,require){
       const selected = [];
       for (const row of rows) {
         const dest = endpoint(value(row, schema.fields.url));
-        if (!dest || dest.host !== __binding.host || dest.port !== 443) continue;
+        if (!dest || dest.host !== target.host || dest.port !== target.port) continue;
         const mapped = {host: dest.host, port: dest.port};
         for (const key of fields) if (key !== 'url') mapped[key] = value(row, schema.fields[key]);
         if (typeof mapped.local !== 'boolean' || typeof mapped.deviceName !== 'string' ||
             typeof mapped.completed !== 'boolean' || typeof mapped.failed !== 'boolean')
           throw new Error('invalid_identity_or_status');
-        if (!mapped.local || mapped.deviceName !== __binding.deviceName || mapped.completed || mapped.failed) continue;
+        if (!mapped.local || mapped.deviceName !== target.deviceName || mapped.completed || mapped.failed) continue;
         if (!Number.isSafeInteger(mapped.id) || mapped.id < 0 ||
             !Number.isSafeInteger(mapped.inBytes) || mapped.inBytes < 0) throw new Error('invalid_counter');
         selected.push(mapped);
@@ -647,7 +665,7 @@ const fresh=()=>({actionAt:null,old:null,known:[],successor:null,previous:null,q
   progressSeconds:0,progressBytes:0,started:false,resumed:false,disarmed:null,rescues:0,fast:null,
   hadTarget:false,emptyAt:null,emptyLast:null,entryAt:null});
 class RecoveryReview {
-  constructor(){this.s=fresh();}
+  constructor(slowBps=2000000){this.slowBps=slowBps;this.s=fresh();}
   afterAction(action,t){
     const rescue=action.decision?.reason==='stalled_own_successor';
     const used=this.s.resumed?0:this.s.rescues;
@@ -670,7 +688,7 @@ class RecoveryReview {
     }else {s.emptyAt=null;s.emptyLast=null;}
     if(s.actionAt!==null&&p.reliable_read&&p.state==='DOWNLOAD'&&!p.protected&&f.unique_main&&p.main_delta_bytes>0)
       s.started=true;
-    if(p.reliable_read&&p.state==='DOWNLOAD'&&f.unique_main&&p.phase_rate_Bps>=2000000){
+    if(p.reliable_read&&p.state==='DOWNLOAD'&&f.unique_main&&p.phase_rate_Bps>=this.slowBps){
       const r=f.targets.find(x=>x.id===p.main_id);if(r)s.fast={id:fp(r),at:t};
     }else if(p.state==='WAIT')s.fast=null;
     if(s.actionAt===null||s.resumed||s.disarmed)return;
@@ -733,7 +751,7 @@ function explain(pipeline,f,d,first=null){
  const lowAge=p.low_since_s===null?null:p.elapsed_s-p.low_since_s;
  const recentFast=sameFast&&f.time_s-s.fast.at<=DEFAULTS.fast_memory_s;
  const replacement=pipeline.replacement;
- return {version:1,stage:first?'action_revalidation':'gate_evaluation',frameTimeS:f.time_s,receivedMs:f.received_ms,
+ return {version:1,...(f.targetId?{targetId:f.targetId,slowBps:pipeline.slowBps}:{}),stage:first?'action_revalidation':'gate_evaluation',frameTimeS:f.time_s,receivedMs:f.received_ms,
   finalReason:d.reason,path:d.reason==='stalled_own_successor'?'own_stalled_successor':'productive_download',
   ...(f.sampling?{sampling:{...f.sampling}}:{}),
   read:{durationMs:f.read_ms,reliable:p.reliable_read,uniqueMain:f.unique_main},
@@ -879,13 +897,13 @@ function uniqueMain(d,p){
   return v.length>0&&v[0][0]===p.main_id&&v[0][1]>0&&(v.length===1||v[0][1]>v[1][1]);
 }
 class MeasurementGate{
-  constructor(){this.reset();}
+  constructor(slowBps=2000000){this.slowBps=slowBps;this.reset();}
   reset(){this.episode=null;this.recoveryUsed=false;this.holdUntil=null;}
   consider(f){
     const p=f.point;
-    if(['WAIT','UNCERTAIN'].includes(p.state)||p.protected||p.phase_rate_Bps>=2e6)this.reset();
+    if(['WAIT','UNCERTAIN'].includes(p.state)||p.protected||p.phase_rate_Bps>=this.slowBps)this.reset();
     if(p.state!=='DOWNLOAD'||p.protected!==false||p.reliable_read!==true||f.unique_main!==true||
-      !finite(p.phase_rate_Bps)||!(p.phase_rate_Bps>0&&p.phase_rate_Bps<2e6)||
+      !finite(p.phase_rate_Bps)||!(p.phase_rate_Bps>0&&p.phase_rate_Bps<this.slowBps)||
       p.low_since_s==null||p.elapsed_s-p.low_since_s<.4||
       (p.hold_until_s!=null&&p.elapsed_s<p.hold_until_s)||
       !finite(p.main_delta_bytes)||!finite(p.current_growth_floor_bytes)||
@@ -898,7 +916,7 @@ class MeasurementGate{
     if(ep!==this.episode){this.reset();this.episode=ep;}
     if(p.recovery_used)this.recoveryUsed=true;
     if(this.holdUntil!==null&&f.time_s<this.holdUntil)return {row:null,reason:'bounded_executor_recovery_observation'};
-    if(!this.recoveryUsed&&p.short_rate_Bps>=2e6){
+    if(!this.recoveryUsed&&p.short_rate_Bps>=this.slowBps){
       this.recoveryUsed=true;this.holdUntil=f.time_s+.4;
       return {row:null,reason:'start_executor_recovery_observation'};
     }
@@ -930,13 +948,15 @@ class Pipeline{
     if(!this.continuous)throw Error('wait_sampling_requires_continuous');
     this.sampling=new WaitSampling(saved);
   }
-  constructor(profile=null){
+  constructor(profile=null,scope=null,slowBps=2000000){
+    if(!Number.isSafeInteger(slowBps)||slowBps<=POLICY.near_zero_Bps||slowBps>1e9)throw Error('invalid_speed_threshold');
+    this.scope=scope;this.slowBps=slowBps;
     if(profile!==null&&!['long-v1','continuous-v1'].includes(profile))throw Error('invalid_pipeline_profile');
     this.continuous=profile==='continuous-v1';
-    this.review=profile!==null?new RecoveryReview():null;
+    this.review=profile!==null?new RecoveryReview(slowBps):null;
     const fields=Object.fromEntries(['id','inBytes','local','deviceName','completed','failed'].map(k=>[k,[k]]));
-    fields.url=['URL'];this.adapt=create({verified:true,rowsPath:['requests'],fields});
-    this.detector=new Detector();this.detector.protect();this.gate=new MeasurementGate();
+    fields.url=['URL'];this.adapt=create({verified:true,rowsPath:['requests'],fields},scope);
+    this.detector=new Detector({slow_Bps:slowBps},scope);this.detector.protect();this.gate=new MeasurementGate(slowBps);
     this.own=new RetryRearm({observation_s:5});this.startup=new DownloadStartup(POLICY);
     this.replacement=null;this.seen=new Map();this.lastTime=null;
   }
@@ -1194,8 +1214,9 @@ function inspectJSON(x,depth=0){
   }
 }
 function capture(p){
+  if(p.isTargetSet)return p.capture();
   const s=p.startup;
-  return copy({version:1,...(p.continuous?{continuous:true}:{}),...(p.sampling?{sampling:p.sampling.s}:{}),...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
+  return copy({version:1,...((p.explicitScope||p.scope&&['host','port','deviceName'].some(k=>p.scope[k]!==require('../core/detector').DEFAULTS[k])||p.slowBps!==2000000)?{scope:p.scope,slowBps:p.slowBps}:{}),...(p.continuous?{continuous:true}:{}),...(p.sampling?{sampling:p.sampling.s}:{}),...(p.review?{review:p.review.s}:{}),core:p.detector.checkpoint(),own:{actionAt:p.own.actionAt,lastClock:p.own.lastClock},
     startup:{clock:s.clock,previous:s.previous?{...s.previous,rows:[...s.previous.rows]}:null,
       history:s.history,tracks:[...s.tracks],quietSince:s.quietSince,waiting:s.waiting,waitOrigin:s.waitOrigin,
       start:s.start,end:s.end,source:s.source,episode:s.episode,awaitOwnSuccessor:s.awaitOwnSuccessor},
@@ -1204,11 +1225,15 @@ function capture(p){
       absent:p.replacement.absent,previous:p.replacement.previous}:null,seen:[...p.seen],lastTime:p.lastTime});
 }
 function restore(x){
+  if(x.targetSet){
+    if(JSON.stringify(x).length>524288)throw Error('snapshot_capacity');inspectJSON(x);
+    return require('../target-set').TargetSet.restore(x);
+  }
   if(JSON.stringify(x).length>196608)throw Error('snapshot_capacity');inspectJSON(x);
-  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[]),...('continuous' in x?['continuous']:[]),...('sampling' in x?['sampling']:[])]);
+  exact(x,['version','core','own','startup','gate','replacement','seen','lastTime',...('review' in x?['review']:[]),...('continuous' in x?['continuous']:[]),...('sampling' in x?['sampling']:[]),...('scope' in x?['scope','slowBps']:[])]);
   if(x.version!==1||!(x.lastTime===null||finite(x.lastTime)))throw Error('snapshot_version');
   if('continuous' in x&&x.continuous!==true)throw Error('snapshot_profile');
-  const p=new Pipeline(x.continuous?'continuous-v1':'review' in x?'long-v1':null);if(!p.detector.restore(x.core))throw Error('snapshot_core');
+  const p=new Pipeline(x.continuous?'continuous-v1':'review' in x?'long-v1':null,x.scope??null,x.slowBps??2000000);if(x.scope)p.explicitScope=true;if(!p.detector.restore(x.core))throw Error('snapshot_core');
   if('sampling' in x)p.enableWaitSampling(x.sampling);
   if(p.review){
     const r=x.review;exact(r,Object.keys(p.review.s));
@@ -1279,7 +1304,7 @@ function observe(s,f,d,compact,pipeline){
   if(!bin||bin.index!==index){
     if(s.continuous){e.timeline=e.timeline.filter(b=>b.index>index-288);}
     else if(e.timeline.length>=291)throw Error('timeline_capacity');
-    bin={index,startMs:t,endMs:t,samples:0,bytes:0,download:0,waiting:0,uncertain:0,
+    bin={...(f.targetId?{rateScope:'selected_target'}:{}),index,startMs:t,endMs:t,samples:0,bytes:0,download:0,waiting:0,uncertain:0,
       eligible:0,maxRate:0,rateSum:0,rateSamples:0,maxReadMs:0};e.timeline.push(bin);
   }
   bin.endMs=t;bin.samples++;bin.bytes+=Math.max(0,f.point.observed_received_bytes-e.lastObservedBytes);
@@ -1296,7 +1321,7 @@ function observe(s,f,d,compact,pipeline){
     'bounded_executor_recovery_observation','recent_fast_dip_confirmation','recovery_rescue_budget_exhausted'].includes(d.reason);
   const key=interesting?`${d.reason}/${coreRecovery?f.point.decision_reason:''}/${f.point.main_id}/${f.point.low_since_s}`:null;
   if(key&&key!==e.lastDecisionKey){
-    e.decisions.push({atMs:t,reason:d.reason,eligible:!!d.row,point:compact,
+    e.decisions.push({atMs:t,...(f.targetId?{targetId:f.targetId}:{}),reason:d.reason,eligible:!!d.row,point:compact,
       explanation:explain(pipeline,f,d),
       before:s.recent.filter((_,i)=>i%4===0).slice(-8)});
     if(e.decisions.length>24){e.decisions.shift();e.decisionsDropped++;}
@@ -1435,7 +1460,7 @@ class SamplingEvidence {
     const e=this.state.samplingEvidence,t=Math.round(f.received_ms),start=t-Math.round(f.read_ms);
     const cadence=[FAST,WAIT,ABSENT].indexOf(f.sampling.periodMs);
     if(cadence<0)throw Error('unknown_sampling_cadence');
-    const cell=cadence+(f.targets.length?0:3),index=Math.floor((t-this.state.runStartedMs)/BIN_MS);
+    const cell=cadence+((f.allTargetCount??f.targets.length)?0:3),index=Math.floor((t-this.state.runStartedMs)/BIN_MS);
     let bin=e.bins.at(-1);
     if(!bin||bin.index!==index){e.bins=e.bins.filter(b=>b.index>index-MAX_BINS);
       bin={index,startMs:t,endMs:t,counts:zero()};e.bins.push(bin);}
@@ -1598,6 +1623,7 @@ function validateBinding(b,validate){
   const normalized={...b,profile:'long-v1',durationMs:b.durationMs??86400000,
     expiresMs:b.expiresMs??b.notBeforeMs+86400000,maxAttempts:b.maxAttempts??(b.mode==='observe'?0:100)};
   delete normalized.budgetScope;delete normalized.engineRecovery;delete normalized.baseLimit;
+  if('targets' in b){require('./jobs').targetRules(b);delete normalized.targets;}
   if('baseLimit' in b&&![100,200].includes(b.baseLimit))throw Error('invalid_base_limit');
   if('engineRecovery' in b&&!['auto','pause'].includes(b.engineRecovery))throw Error('invalid_engine_recovery');
   validate(normalized);return b;
@@ -1652,9 +1678,108 @@ function gc(s,store,owned){
 module.exports={validateState,validateBinding,fresh,pruneActions,gc};
 
 };
+__factories["src/target-set"]=function(module,exports,require){
+'use strict';
+// One API read, isolated policy state per endpoint, one shared action budget.
+const {Pipeline}=require('./pipeline');
+const {targetRules}=require('./autonomous/jobs');
+const snapshots=require('./autonomous/snapshot');
+const scope=(b,r)=>({host:r.host,port:r.port,deviceName:b.deviceName});
+class TargetSet{
+  constructor(profile,b){
+    this.isTargetSet=true;this.profile=profile;this.rules=targetRules(b);this.deviceName=b.deviceName;
+    this.pipelines=this.rules.map(r=>{const p=new Pipeline(profile,scope(b,r),r.slowBps);p.explicitScope=true;return p;});
+    this.active=0;this.cursor=0;this.lastActionId=0;this.globalActionAt=null;this.globalLastClock=null;
+    this.frames=[];this.decisions=[];this.periodMs=100;
+    const self=this;
+    this.sampling={resetCadence(){for(const p of self.pipelines)p.sampling?.resetCadence();self.periodMs=100;},
+      lost(){for(const p of self.pipelines)p.sampling?.lost();},
+      next(f,p,pending){let period=1000;
+        for(let i=0;i<self.pipelines.length;i++)period=Math.min(period,self.pipelines[i].sampling.next(
+          self.frames[i],self.pipelines[i],pending));
+        for(const p of self.pipelines)p.sampling.periodMs=period;
+        self.periodMs=period;return period;}};
+  }
+  get current(){return this.pipelines[this.active];}
+  get detector(){return this.current.detector;}
+  get gate(){return this.current.gate;}
+  get review(){return this.current.review;}
+  get replacement(){return this.current.replacement;}
+  get slowBps(){return this.rules[this.active].slowBps;}
+  get own(){return this.pipelines[this.lastActionId].own;}
+  enableWaitSampling(){for(const p of this.pipelines)if(!p.sampling)p.enableWaitSampling();}
+  ingest(payload,begin,end,engine){
+    this.frames=this.pipelines.map((p,i)=>({...p.ingest(payload,begin,end,engine),targetId:this.rules[i].id}));
+    this.decisions=this.frames.map((f,i)=>this.pipelines[i].consider(f));
+    let chosen=-1;
+    for(let n=0;n<this.rules.length;n++){const i=(this.cursor+n)%this.rules.length;
+      if(this.decisions[i].row){chosen=i;break;}}
+    if(chosen<0)chosen=this.frames.findIndex(f=>f.targets.length>0);
+    if(chosen<0)chosen=this.cursor;
+    this.active=chosen;const f=this.frames[chosen];
+    // Aggregate only monotonic traffic totals, never policy speed windows.
+    f.point={...f.point,observed_received_bytes:this.frames.reduce((n,x)=>n+x.point.observed_received_bytes,0)};
+    f.allTargetCount=this.frames.reduce((n,x)=>n+x.targets.length,0);
+    f.sampling={...f.sampling,periodMs:this.periodMs};this.globalLastClock=f.time_s;
+    return f;
+  }
+  consider(f){
+    if(f!==this.frames[this.active])throw Error('target_frame_changed');
+    const d=this.decisions[this.active];
+    return d.row&&this.globalActionAt!==null&&f.time_s-this.globalActionAt<5?
+      {row:null,reason:'shared_reconnect_observation'}:d;
+  }
+  revalidate(first,f,now){
+    if(first.targetId!==undefined&&first.targetId!==f.targetId)return {row:null,reason:'target_changed_before_dispatch'};
+    const d=this.consider(f);return d.row?this.current.revalidate(first,f,now):d;
+  }
+  afterAction(a,t){
+    if(a.targetId!==this.rules[this.active].id)throw Error('action_target_mismatch');
+    this.current.afterAction(a,t);this.lastActionId=this.active;this.globalActionAt=t/1000;this.globalLastClock=t/1000;
+    // Fair selection when several independent endpoints remain slow.
+    this.cursor=(this.active+1)%this.rules.length;
+  }
+  rebaseline(t,fn){this.pipelines=this.pipelines.map(p=>fn(p,t));this.periodMs=100;return this;}
+  capture(){
+    const pipelines=this.pipelines.map(snapshots.capture),base=pipelines[this.lastActionId];
+    return {...base,targetSet:{version:1,profile:this.profile,rules:this.rules,deviceName:this.deviceName,
+      active:this.active,cursor:this.cursor,lastActionId:this.lastActionId,globalActionAt:this.globalActionAt,
+      globalLastClock:this.globalLastClock,pipelines}};
+  }
+  static restore(x){
+    const m=x.targetSet,integer=n=>Number.isSafeInteger(n)&&n>=0;
+    if(!m||Object.keys(m).sort().join()!=='active,cursor,deviceName,globalActionAt,globalLastClock,lastActionId,pipelines,profile,rules,version'||
+      m.version!==1||m.profile!=='continuous-v1'||!Array.isArray(m.pipelines)||m.pipelines.length!==m.rules?.length||
+      ![m.active,m.cursor,m.lastActionId].every(n=>integer(n)&&n<m.rules.length)||
+      ![m.globalActionAt,m.globalLastClock].every(n=>n===null||Number.isFinite(n)&&n>=0)||
+      m.globalActionAt!==null&&(m.globalLastClock===null||m.globalActionAt>m.globalLastClock))throw Error('invalid_target_snapshot');
+    const p=new TargetSet(m.profile,{targets:m.rules,host:m.rules[0].host,deviceName:m.deviceName});
+    p.pipelines=m.pipelines.map((s,i)=>{
+      if(s.targetSet||JSON.stringify(s.scope)!==JSON.stringify(scope(m,m.rules[i]))||s.slowBps!==m.rules[i].slowBps)
+        throw Error('target_snapshot_scope_changed');
+      return snapshots.restore(s);
+    });
+    Object.assign(p,{active:m.active,cursor:m.cursor,lastActionId:m.lastActionId,
+      globalActionAt:m.globalActionAt,globalLastClock:m.globalLastClock});
+    const {targetSet,...base}=x;
+    if(JSON.stringify(base)!==JSON.stringify(m.pipelines[m.lastActionId])||p.own.actionAt!==p.globalActionAt||
+      p.pipelines.some(q=>q.own.actionAt!==null&&(p.globalActionAt===null||q.own.actionAt>p.globalActionAt)))
+      throw Error('target_snapshot_action_clock');
+    return p;
+  }
+}
+function create(b){
+  if(b.targets)return new TargetSet(b.profile,b);
+  return new Pipeline(b.profile??null,{host:b.host,port:443,deviceName:b.deviceName});
+}
+module.exports={TargetSet,create};
+
+};
 __factories["src/autonomous/runtime"]=function(module,exports,require){
 'use strict';
 const {Pipeline,fingerprint}=require('../pipeline');
+const targetSet=require('../target-set');
+const {targetRules}=require('./jobs');
 const {endpoint}=require('../core/adapter');
 const {byteLength}=require('../core/runner');
 const ownership=require('./ownership');
@@ -1675,6 +1800,7 @@ function validate(b){
   const keys=['enabled','runId','mode','host','deviceName','expectedBuild','expectedModel','notBeforeMs',
     'latestStartMs','expiresMs','durationMs','referenceMs','tailMs','maxAttempts','diagnostic'];
   if(b&&Object.prototype.hasOwnProperty.call(b,'waitTargetMs'))keys.push('waitTargetMs');
+  if(b&&'targets' in b)throw Error('targets_require_continuous_binding');
   const extended=b?.profile==='long-v1';
   if(b&&Object.prototype.hasOwnProperty.call(b,'profile'))keys.push('profile');
   if(!b||Object.keys(b).sort().join()!==keys.sort().join()||b.enabled!==true||
@@ -1704,6 +1830,10 @@ function compact(f){const p=f.point;return [Math.round(f.time_s*1000),f.read_ms,
   p.short_rate_Bps,p.main_delta_bytes,p.state,p.protected,f.startup.remaining_s,f.rearm.window_remaining_s,
   f.targets.map(r=>[r.id,r.inBytes])];}
 function validateHandoff(s,b){
+  if(s.pipeline.targetSet){
+    const m=s.pipeline.targetSet;
+    if(JSON.stringify(m.rules)!==JSON.stringify(targetRules(b))||m.deviceName!==b.deviceName)throw Error('handoff_target_scope_changed');
+  }else if(b.targets)throw Error('handoff_target_state_missing');
   if(s.diagnostics)diagnostics.validate(s.diagnostics);
   if(s.samplingEvidence)samplingEvidence.validate(s.samplingEvidence,s.samples);
   if(s.samplingCounts){const c=s.samplingCounts;
@@ -1767,7 +1897,7 @@ function start(o){
   const b=o.binding,cont=b?.profile==='continuous-v1';let ended=false,owned=null,state=null,pipeline=null,pending=null,token=0,lastClock=null,reservedPending=null;
   const done=(reason,extra={})=>o.done({reason,...extra});
   if(!b||b.enabled!==true){done('disabled');return;}
-  validate(b);
+  validate(b);const rules=targetRules(b);
   if(b.mode!=='observe'&&o.capabilities?.actionsQualified!==true){done('active_build_not_qualified');return;}
   if(!/^[A-Za-z0-9-]{1,80}$/.test(o.sessionId)||!/^[a-f0-9]{64}$/.test(o.codeId))throw Error('invalid_runtime_identity');
   const binding=JSON.stringify(b),store={read:o.readStore,write:(k,v)=>o.writeStore(v,k)};
@@ -1805,8 +1935,25 @@ function start(o){
     if(parent.state.sessions>=(cont?Number.MAX_SAFE_INTEGER:b.profile==='long-v1'?Math.ceil(b.durationMs/PERIOD)+2:16)||begin<parent.state.updatedMs){done('handoff_limit_or_clock');return;}
     if(!recoveryBlocked)validateHandoff(parent.state,b);
     pipeline=snapshots.restore(parent.state.pipeline);
-  }else pipeline=cont&&parent.state?.continuous?snapshots.restore(parent.state.pipeline):new Pipeline(b.profile??null);
-  if(cont){if(!pipeline.sampling)pipeline.enableWaitSampling();pipeline.sampling.resetCadence();}
+  }else pipeline=cont&&parent.state?.continuous?snapshots.restore(parent.state.pipeline):targetSet.create(b);
+  if(cont&&b.targets&&!same){
+    const old=pipeline,next=targetSet.create(b),prior=old.isTargetSet?old.pipelines:[old];
+    for(let i=0;i<next.rules.length;i++){
+      const rule=next.rules[i],p=prior.find(p=>p.detector.p.host===rule.host&&p.detector.p.port===rule.port);
+      if(!p)continue;
+      if(p.slowBps!==rule.slowBps){
+        p.slowBps=rule.slowBps;p.detector.p.slow_Bps=rule.slowBps;
+        p.detector.discardEvidence();p.detector.protect();p.gate.slowBps=rule.slowBps;p.gate.reset();
+        if(p.review){p.review.slowBps=rule.slowBps;p.review.s.fast=null;}
+      }
+      p.scope={host:rule.host,port:rule.port,deviceName:b.deviceName};p.explicitScope=true;next.pipelines[i]=p;
+    }
+    const last=old.isTargetSet?old.pipelines[old.lastActionId]:old;
+    const i=next.rules.findIndex(r=>r.host===last.detector.p.host&&r.port===last.detector.p.port);
+    if(i<0)throw Error('inherited_target_missing');
+    next.lastActionId=i;next.globalActionAt=last.own.actionAt;next.globalLastClock=last.own.lastClock;pipeline=next;
+  }
+  if(cont){if(pipeline.isTargetSet)pipeline.enableWaitSampling();if(!pipeline.sampling)pipeline.enableWaitSampling();pipeline.sampling.resetCadence();}
   const actualBuild=o.surgeBuild??null,previousBuild=parent.state?.surgeBuild?.current??b.expectedBuild;
   if(actualBuild!==null&&(!/^[1-9][0-9]{0,9}$/.test(actualBuild)||
     !/^[1-9][0-9]{0,9}$/.test(previousBuild)||Number(actualBuild)<Number(previousBuild))){
@@ -1814,8 +1961,9 @@ function start(o){
   }
   const buildChanged=actualBuild!==null&&actualBuild!==previousBuild;
   function rebaseline(old,t){
-    const p=new Pipeline('continuous-v1'),ownPending=old.own.actionAt!==null&&t/1000-old.own.actionAt<5;
-    Object.assign(p.own,old.own);p.enableWaitSampling(old.sampling?.s??null);p.sampling.resetCadence();
+    if(old.isTargetSet)return old.rebaseline(t,rebaseline);
+    const p=new Pipeline('continuous-v1',old.scope,old.slowBps),ownPending=old.own.actionAt!==null&&t/1000-old.own.actionAt<5;
+    p.explicitScope=old.explicitScope;Object.assign(p.own,old.own);p.enableWaitSampling(old.sampling?.s??null);p.sampling.resetCadence();
     p.review.s={...old.review.s,disarmed:'successor_lost_or_ambiguous',successor:null,previous:null,
       quietAt:null,fast:null,hadTarget:ownPending,emptyAt:null,emptyLast:null,entryAt:null};
     if(ownPending)p.startup.afterAction(old.own.actionAt);
@@ -1845,6 +1993,7 @@ function start(o){
       diagnostics:diagnostics.fresh()};
     if(b.profile==='long-v1'||cont)Object.assign(fresh,{originMs:begin,sessionHistoryDropped:0,longEvidence:evidence.fresh()});
     if(cont)fresh.continuous=same?null:continuous.fresh(b,parent.state,begin);
+    if(cont&&b.targets)fresh.longEvidence.lastObservedBytes=pipeline.pipelines.reduce((n,p)=>n+p.detector.s.total,0);
     const s=same?copy(parent.state):fresh;
     if(!s.diagnostics)s.diagnostics=diagnostics.fresh();
     if(recovering)diagnostics.fault(s.diagnostics,'session_interrupted',s,begin,'interrupted_session',
@@ -1938,17 +2087,36 @@ function start(o){
     (!cont||(!state.continuous.faultLocked&&(reserved||allowance.view(state.continuous.allowance,t).remaining>0)))&&phase(t)==='actions'&&
     t<expiry&&t<sessionDeadline&&store.read(ownership.HEAD)===owned;}
   function record(f){
-    const row=compact(f);state.recent.push(row);if(state.recent.length>64)state.recent.shift();
+    if(pipeline.isTargetSet){
+      const last=state.actions.at(-1),i=pipeline.rules.findIndex(r=>r.id===last?.targetId);
+      if(i>=0&&i!==pipeline.active){
+        const ownFrame=pipeline.frames[i],a=last,replacement=pipeline.pipelines[i].replacement,row=compact(ownFrame);
+        if(replacement&&a.startedMs!==null){
+          if(a.effectConfirmedMs===null&&replacement.absent>=2&&replacement.growing.size>0){
+            a.effectConfirmedMs=ownFrame.received_ms;a.successors=[...replacement.growing];}
+          const main=ownFrame.targets.find(r=>r.id===ownFrame.point.main_id);
+          if(a.firstThresholdMs===null&&main&&replacement.allows(main)&&ownFrame.point.reliable_read&&
+            ownFrame.point.phase_rate_Bps>=pipeline.rules[i].slowBps)a.firstThresholdMs=ownFrame.received_ms;
+          if(row[0]>a.startedMs&&row[0]-a.startedMs<=30000&&
+            (a.followupEndMs===null||row[0]<a.followupEndMs)&&a.followup.length<102&&
+            (!a.followup.length||row[0]-a.followup.at(-1)[0]>=390))a.followup.push(row);
+        }
+      }
+    }
+    const row=compact(f);
+    if(f.targetId&&state.recentTargetId!==f.targetId){state.recent=[];state.recentTargetId=f.targetId;}
+    state.recent.push(row);if(state.recent.length>64)state.recent.shift();
     const a=state.actions.at(-1),replacement=pipeline.replacement;
-    if(a&&a.startedMs!==null&&replacement){
+    const sameTarget=!f.targetId||a?.targetId===f.targetId;
+    if(a&&sameTarget&&a.startedMs!==null&&replacement){
       if(a.effectConfirmedMs===null&&replacement.absent>=2&&replacement.growing.size>0){
         a.effectConfirmedMs=f.received_ms;a.successors=[...replacement.growing];event('replacement_observed',{sequence:a.sequence});}
       const main=f.targets.find(r=>r.id===f.point.main_id);
-      if(a.firstThresholdMs===null&&main&&replacement.allows(main)&&f.point.reliable_read&&f.point.phase_rate_Bps>=2000000)
+      if(a.firstThresholdMs===null&&main&&replacement.allows(main)&&f.point.reliable_read&&f.point.phase_rate_Bps>=pipeline.slowBps)
         a.firstThresholdMs=f.received_ms;
     }
     for(const a of state.actions){
-      if(a.startedMs===null||row[0]<=a.startedMs||row[0]-a.startedMs>(state.longEvidence?30000:20000)||
+      if((f.targetId&&a.targetId!==f.targetId)||a.startedMs===null||row[0]<=a.startedMs||row[0]-a.startedMs>(state.longEvidence?30000:20000)||
         (a.followupEndMs!==null&&row[0]>=a.followupEndMs))continue;
       if(a.followup.length<102&&(!a.followup.length||row[0]-a.followup.at(-1)[0]>=(state.longEvidence?390:190)))a.followup.push(row);
     }
@@ -2006,7 +2174,7 @@ function start(o){
   function action(f,d,first){
     if(!mayAct())return false;
     const before=[];for(const r of state.recent)if(!before.length||r[0]-before.at(-1)[0]>=190)before.push(r);
-    const a={sequence:state.invocations+1,connection:{...d.row},pre_action_targets:f.targets,
+    const a={sequence:state.invocations+1,...(f.targetId?{targetId:f.targetId}:{}),connection:{...d.row},pre_action_targets:f.targets,
       reservedMs:now(),startedMs:null,completedMs:null,status:'reserved_unknown',kind:b.mode,
       decision:{point:f.point,startup:f.startup,rearm:f.rearm,reason:d.reason,
         explanation:explain(pipeline,f,d,first)},before:before.slice(-33),
@@ -2016,7 +2184,7 @@ function start(o){
     state.actions.push(a);state.attemptsReserved++;event('action_reserved',{sequence:a.sequence});persist();
     // Set this only AFTER durable confirmation. Failed/unknown writes remain
     // reserved_unknown and can never enter the proven-no-dispatch path.
-    reservedPending={a,first:{row:d.row,reason:d.reason,receivedMs:f.received_ms},rechecks:0};
+    reservedPending={a,first:{row:d.row,reason:d.reason,receivedMs:f.received_ms,...(f.targetId?{targetId:f.targetId}:{})},rechecks:0};
     dispatchReserved(f,d,first);
     return true;
   }
@@ -2046,7 +2214,7 @@ function start(o){
       if(end>=sessionDeadline){yieldOrFinish();return;}
       if(!payload||!Array.isArray(payload.requests)){readFailure('invalid_requests_shape');return;}
       state.readFailures=0;
-      const relevant=payload.requests.filter(r=>{const dest=endpoint(r.URL);return dest&&dest.host===b.host&&dest.port===443&&
+      const relevant=payload.requests.filter(r=>{const dest=endpoint(r.URL);return dest&&rules.some(r=>dest.host===r.host&&dest.port===r.port)&&
         r.local===true&&r.deviceName===b.deviceName&&r.completed===false&&r.failed===false;});
       if(relevant.some(r=>!['TCP','HTTPS'].includes(r.method)))throw Error('unexpected_target_transport');
       if(state.streamId===null&&relevant.length){const ids=new Set(relevant.map(r=>r.engineIdentifier));
@@ -2072,7 +2240,11 @@ function start(o){
       state.lastSampleMs=f.time_s*1000;state.states[f.point.state]=(state.states[f.point.state]||0)+1;
       if(f.point.candidate)state.candidates++;
       if(state.originMs===null&&f.point.reliable_read&&f.point.recently_productive){state.originMs=end;event('download_origin');}
-      state.phase=phase(end);state.lastTargetCount=f.targets.length;state.lastTrafficState=f.point.state;record(f);
+      state.phase=phase(end);state.lastTargetCount=f.allTargetCount??f.targets.length;state.lastTrafficState=f.point.state;
+      if(pipeline.isTargetSet)state.targetStatus=pipeline.frames.map((x,i)=>({id:x.targetId,
+        observedMs:x.received_ms,connections:x.targets.length,state:x.point.state,
+        rateBps:x.point.phase_rate_Bps,slowBps:pipeline.rules[i].slowBps,observedBytes:pipeline.pipelines[i].detector.s.total}));
+      record(f);
       const d=b.mode==='diagnostic'?diagnostic(f):pipeline.consider(f);
       state.gateReasons[d.reason]=(state.gateReasons[d.reason]||0)+1;if(d.row)state.eligible++;
       samplingLog?.observe(f,d);
@@ -2090,7 +2262,7 @@ function start(o){
           const fresh=b.mode==='diagnostic'?(fingerprint(pending.row)===fingerprint(d.row)&&d.row.inBytes>pending.row.inBytes?
             d:{row:null}):pipeline.revalidate(pending,f,now());pending=null;
           if(fresh.row&&action(f,fresh,first))return;
-        }else pending={row:d.row,reason:d.reason,receivedMs:end};
+        }else pending={row:d.row,reason:d.reason,receivedMs:end,...(f.targetId?{targetId:f.targetId}:{})};
       }else pending=null;
       // Continuous-only stable-WAIT optimization. Revalidation and all recovery
       // stay fast; legacy finite profiles retain their original cadence.
@@ -2124,8 +2296,23 @@ const canonical=x=>x===null||typeof x!=='object'?JSON.stringify(x):Array.isArray
 const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).sort().join()===keys.split(',').sort().join();
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const id=x=>typeof x==='string'&&/^[a-z0-9-]{16,64}$/.test(x);
+function targetRules(b){
+  const rules=b.targets??[{id:'primary',host:b.host,port:443,slowBps:2000000}];
+  if(!Array.isArray(rules)||!rules.length||rules.length>4)throw Error('invalid_target_rules');
+  const ids=new Set(),hosts=new Set();
+  for(const r of rules){
+    if(!exact(r,'id,host,port,slowBps')||typeof r.id!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(r.id)||
+      typeof r.host!=='string'||r.host.length>253||!r.host.includes('.')||
+      !r.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
+      !integer(r.port)||r.port<1||r.port>65535||!integer(r.slowBps)||r.slowBps<=40960||r.slowBps>1e9||
+      ids.has(r.id)||hosts.has(r.host+':'+r.port))throw Error('invalid_target_rules');
+    ids.add(r.id);hosts.add(r.host+':'+r.port);
+  }
+  if(rules[0].host!==b.host||rules[0].port!==443)throw Error('primary_target_required');
+  return rules.map(r=>({...r}));
+}
 function validateService(s){
-  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':'')+(s&&'budgetScope' in s?',budgetScope':'')+(s&&'engineRecovery' in s?',engineRecovery':'')+(s&&'baseLimit' in s?',baseLimit':''))||
+  if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':'')+(s&&'budgetScope' in s?',budgetScope':'')+(s&&'engineRecovery' in s?',engineRecovery':'')+(s&&'baseLimit' in s?',baseLimit':'')+(s&&'targets' in s?',targets':''))||
     ('layout' in s&&!['single-worker-v1','diagnostic-pair-v1'].includes(s.layout))||
     ('budgetScope' in s&&(!id(s.budgetScope)||s.layout!=='single-worker-v1'))||
     ('baseLimit' in s&&(!s.budgetScope||![100,200].includes(s.baseLimit)))||
@@ -2135,6 +2322,8 @@ function validateService(s){
     typeof s.deviceName!=='string'||!s.deviceName.length||s.deviceName.length>64||
     typeof s.expectedBuild!=='string'||!/^\d{1,10}$/.test(s.expectedBuild)||
     typeof s.expectedModel!=='string'||!s.expectedModel.length||s.expectedModel.length>64)throw Error('invalid_service');
+  targetRules(s);
+  if(s.targets&&(!s.budgetScope||s.layout!=='single-worker-v1'))throw Error('targets_require_continuous_service');
   return s;
 }
 function validateTask(t){
@@ -2163,8 +2352,9 @@ function validateTask(t){
   return t;
 }
 function bindingFor(s,t,now){
+  if(s.targets&&t.profile!=='continuous-v1')throw Error('targets_require_continuous_task');
   const end=t.durationMs===null?null:now+t.waitTargetMs+t.durationMs;
-  return {enabled:true,runId:t.runId,mode:t.kind==='execute'?'execute':'observe',host:s.host,deviceName:s.deviceName,
+  return {enabled:true,runId:t.runId,mode:t.kind==='execute'?'execute':'observe',host:s.host,deviceName:s.deviceName,...(s.targets?{targets:copy(s.targets)}:{}),
     ...(t.profile?{profile:t.profile}:{}),...(t.profile==='continuous-v1'?{budgetScope:s.budgetScope,...(s.baseLimit!==undefined?{baseLimit:s.baseLimit}:{}),...(s.engineRecovery?{engineRecovery:s.engineRecovery}:{})}:{}),
     expectedBuild:s.expectedBuild,expectedModel:s.expectedModel,notBeforeMs:now,
     latestStartMs:Math.min(now+PERIOD,end===null?Number.MAX_SAFE_INTEGER:end-1),expiresMs:end,durationMs:t.durationMs,
@@ -2175,7 +2365,8 @@ function ledgerService(s,j){
   if(j.phase!=='finished'||j.task.profile!=='continuous-v1')return s;
   const old=j.binding?.baseLimit;
   if((old??100)>(s.baseLimit??100))throw Error('historical_base_limit_exceeds_service');
-  const prior={...s};delete prior.baseLimit;if(old!==undefined)prior.baseLimit=old;return prior;
+  const prior={...s};delete prior.baseLimit;if(old!==undefined)prior.baseLimit=old;
+  delete prior.targets;if(j.binding?.targets)prior.targets=copy(j.binding.targets);return prior;
 }
 function validateLedger(state,s){
   if(s.budgetScope){allowance.grants(state.grants);if(!integer(state.runSequence))throw Error('invalid_run_sequence');}
@@ -2215,9 +2406,13 @@ function context(s,o){
   function head(){
     const h=owner.head(store);
     const previous=h.state?JSON.parse(h.state.service):null;
+    const priorService=previous?{...previous}:null;
+    if(priorService&&previous.installationId!==s.installationId){
+      delete priorService.targets;if(s.targets)priorService.targets=copy(s.targets);
+    }
     const upgrade=!!(s.budgetScope&&previous?.budgetScope===s.budgetScope&&
       (s.baseLimit??100)>=(previous.baseLimit??100)&&
-      canonical({...previous,installationId:s.installationId,...('baseLimit' in s?{baseLimit:s.baseLimit}:{})})===canonical(s)&&
+      canonical({...priorService,installationId:s.installationId,...('baseLimit' in s?{baseLimit:s.baseLimit}:{})})===canonical(s)&&
       (!h.state.current||['finished','cancelled','expired'].includes(h.state.current.phase)));
     if(h.state&&((!upgrade&&(h.state.codeId!==o.codeId||h.state.service!==canonical(s)))||!integer(h.state.clockMs)||
       o.now()<h.state.clockMs))throw Error('job_service_or_clock_changed');
@@ -2512,7 +2707,7 @@ function topup(s,o,g){
     state.grants={version:1,sequence:g.sequence,entries:[...entries,copy(g)]};return state;
   });return {status:'grant_received',received:true,duplicate:false,grant:copy(g),grants:next.grants};
 }
-module.exports={topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control,checkEnvironment};
+module.exports={targetRules,topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control,checkEnvironment};
 
 };
 __factories["src/autonomous/job-probe"]=function(module,exports,require){
@@ -2632,6 +2827,7 @@ module.exports={dispatch};
         $cronexp!==__require('src/autonomous/schedule').cron)throw Error('configured_timer_required');
       // Core module defaults need the fixed target before the runtime is loaded.
       __binding=s;
+      __require('src/core/target-scope').configure({host:s.host,port:443,deviceName:s.deviceName});
       __require('src/autonomous/job-service').dispatch(s,role,{codeId:__codeId,sessionId:$script.sessionID,capabilities:__capabilities,surgeBuild,
         now:()=>Date.now(),schedule:(fn,ms)=>setTimeout(fn,ms),read:k=>$persistentStore.read(k),
         write:(v,k)=>$persistentStore.write(v,k),setBinding:b=>{__binding=b;},
@@ -2648,6 +2844,7 @@ module.exports={dispatch};
     const b=envelope.binding;
     if(!b||b.enabled!==true){done({reason:'disabled'});return;}
     __binding=b;
+    __require('src/core/target-scope').configure({host:b.host,port:443,deviceName:b.deviceName});
     if(typeof $environment!=='object'||$environment.system!=='tvOS'||
       String($environment['surge-build'])!==b.expectedBuild||$environment['device-model']!==b.expectedModel||
       typeof $script!=='object'||typeof $script.sessionID!=='string')throw Error('wrong_tv_environment');
