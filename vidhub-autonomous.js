@@ -1,4 +1,4 @@
-// Version 09f12ff12f32166f2112372d740fb9a541b91cdac6fe39cbb616f034f32bdf5e; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
+// Version ae56628510906021886abe3c583a61941eb197453c072594f1c3ad138c866886; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="09f12ff12f32166f2112372d740fb9a541b91cdac6fe39cbb616f034f32bdf5e";
+const __codeId="ae56628510906021886abe3c583a61941eb197453c072594f1c3ad138c866886";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/target-scope"]=function(module,exports,require){
 'use strict';
@@ -1225,6 +1225,10 @@ function capture(p){
       absent:p.replacement.absent,previous:p.replacement.previous}:null,seen:[...p.seen],lastTime:p.lastTime});
 }
 function restore(x){
+  if(x.patternTargets){
+    if(JSON.stringify(x).length>524288)throw Error('snapshot_capacity');inspectJSON(x);
+    return require('../target-set').PatternTargets.restore(x);
+  }
   if(x.targetSet){
     if(JSON.stringify(x).length>524288)throw Error('snapshot_capacity');inspectJSON(x);
     return require('../target-set').TargetSet.restore(x);
@@ -1682,11 +1686,13 @@ __factories["src/target-set"]=function(module,exports,require){
 'use strict';
 // One API read, isolated policy state per endpoint, one shared action budget.
 const {Pipeline}=require('./pipeline');
-const {targetRules}=require('./autonomous/jobs');
+const {targetRules,matchesTarget}=require('./autonomous/jobs');
+const {endpoint}=require('./core/adapter');
 const snapshots=require('./autonomous/snapshot');
 const scope=(b,r)=>({host:r.host,port:r.port,deviceName:b.deviceName});
 class TargetSet{
   constructor(profile,b){
+    if(new.target===TargetSet&&b.targets?.some(r=>r.hostPattern))return new PatternTargets(profile,b);
     this.isTargetSet=true;this.profile=profile;this.rules=targetRules(b);this.deviceName=b.deviceName;
     this.pipelines=this.rules.map(r=>{const p=new Pipeline(profile,scope(b,r),r.slowBps);p.explicitScope=true;return p;});
     this.active=0;this.cursor=0;this.lastActionId=0;this.globalActionAt=null;this.globalLastClock=null;
@@ -1768,18 +1774,81 @@ class TargetSet{
     return p;
   }
 }
+function instanceId(rule,host){
+  let hash=2166136261;for(const c of host+':'+rule.port){hash^=c.charCodeAt(0);hash=Math.imul(hash,16777619);}
+  return rule.id.slice(0,20)+'-'+(hash>>>0).toString(16).padStart(8,'0');
+}
+class PatternTargets extends TargetSet{
+  constructor(profile,b){
+    const configured=targetRules(b);
+    super(profile,{...b,targets:configured.filter(r=>r.host!==undefined)});
+    this.isPatternTargets=true;this.configuredRules=configured;this.retiredObservedBytes=0;
+  }
+  ruleFor(host,port){return this.configuredRules.find(r=>matchesTarget(r,host,port));}
+  addHost(host,port,present=new Set()){
+    if(this.rules.some(r=>r.host===host&&r.port===port))return;
+    const rule=this.ruleFor(host,port);if(!rule||!rule.hostPattern)throw Error('unconfigured_target_host');
+    if(this.rules.length>=4){
+      // Bound memory. Retain the most recent action's policy and all currently
+      // present endpoints. The new frame always establishes a fresh baseline.
+      const i=this.rules.findIndex((r,i)=>i!==this.lastActionId&&r.id!==this.configuredRules[0].id&&
+        !present.has(r.host+':'+r.port));
+      if(i<0)throw Error('target_instance_capacity');
+      this.retiredObservedBytes+=this.pipelines[i].detector.s.total;
+      this.rules.splice(i,1);this.pipelines.splice(i,1);if(this.lastActionId>i)this.lastActionId--;
+      this.active=0;this.cursor=0;
+    }
+    const id=instanceId(rule,host);if(this.rules.some(r=>r.id===id))throw Error('target_instance_id_collision');
+    const exact={id,host,port,slowBps:rule.slowBps};
+    const p=new Pipeline(this.profile,scope(this,exact),rule.slowBps);p.explicitScope=true;
+    if(this.pipelines.every(p=>p.sampling))p.enableWaitSampling();
+    this.rules.push(exact);this.pipelines.push(p);
+  }
+  seed(prior){for(const p of prior){const d=p.detector.p;
+    if(this.ruleFor(d.host,d.port))this.addHost(d.host,d.port);}}
+  ingest(payload,begin,end,engine){
+    const actual=new Map();
+    for(const row of payload.requests){
+      if(row.local!==true||row.deviceName!==this.deviceName||row.completed!==false||row.failed!==false)continue;
+      const dest=endpoint(row.URL);if(dest&&this.ruleFor(dest.host,dest.port))actual.set(dest.host+':'+dest.port,dest);
+    }
+    const present=new Set(actual.keys());
+    for(const dest of actual.values())this.addHost(dest.host,dest.port,present);
+    const frame=super.ingest(payload,begin,end,engine);
+    frame.point.observed_received_bytes+=this.retiredObservedBytes;
+    return frame;
+  }
+  capture(){return {...super.capture(),patternTargets:{version:1,configuredRules:this.configuredRules,
+    retiredObservedBytes:this.retiredObservedBytes}};}
+  static restore(x){
+    const {patternTargets,...base}=x;
+    if(!patternTargets||Object.keys(patternTargets).sort().join()!=='configuredRules,retiredObservedBytes,version'||patternTargets.version!==1||
+      !Number.isSafeInteger(patternTargets.retiredObservedBytes)||patternTargets.retiredObservedBytes<0)
+      throw Error('invalid_pattern_snapshot');
+    const rules=targetRules({host:patternTargets.configuredRules?.[0]?.host,targets:patternTargets.configuredRules});
+    if(!rules.some(r=>r.hostPattern))throw Error('invalid_pattern_snapshot');
+    const p=TargetSet.restore(base);
+    for(const r of p.rules){const configured=rules.find(c=>matchesTarget(c,r.host,r.port));
+      if(!configured||r.slowBps!==configured.slowBps||
+        r.id!==(configured.hostPattern?instanceId(configured,r.host):configured.id))throw Error('pattern_snapshot_scope_changed');}
+    for(const r of rules.filter(r=>r.host!==undefined))if(!p.rules.some(x=>x.id===r.id&&x.host===r.host))
+      throw Error('pattern_snapshot_missing_exact_target');
+    Object.setPrototypeOf(p,PatternTargets.prototype);p.isPatternTargets=true;p.configuredRules=rules;
+    p.retiredObservedBytes=patternTargets.retiredObservedBytes;return p;
+  }
+}
 function create(b){
   if(b.targets)return new TargetSet(b.profile,b);
   return new Pipeline(b.profile??null,{host:b.host,port:443,deviceName:b.deviceName});
 }
-module.exports={TargetSet,create};
+module.exports={TargetSet,PatternTargets,create};
 
 };
 __factories["src/autonomous/runtime"]=function(module,exports,require){
 'use strict';
 const {Pipeline,fingerprint}=require('../pipeline');
 const targetSet=require('../target-set');
-const {targetRules}=require('./jobs');
+const {targetRules,matchesTarget}=require('./jobs');
 const {endpoint}=require('../core/adapter');
 const {byteLength}=require('../core/runner');
 const ownership=require('./ownership');
@@ -1832,7 +1901,7 @@ function compact(f){const p=f.point;return [Math.round(f.time_s*1000),f.read_ms,
 function validateHandoff(s,b){
   if(s.pipeline.targetSet){
     const m=s.pipeline.targetSet;
-    if(JSON.stringify(m.rules)!==JSON.stringify(targetRules(b))||m.deviceName!==b.deviceName)throw Error('handoff_target_scope_changed');
+    if(JSON.stringify(s.pipeline.patternTargets?.configuredRules??m.rules)!==JSON.stringify(targetRules(b))||m.deviceName!==b.deviceName)throw Error('handoff_target_scope_changed');
   }else if(b.targets)throw Error('handoff_target_state_missing');
   if(s.diagnostics)diagnostics.validate(s.diagnostics);
   if(s.samplingEvidence)samplingEvidence.validate(s.samplingEvidence,s.samples);
@@ -1938,6 +2007,8 @@ function start(o){
   }else pipeline=cont&&parent.state?.continuous?snapshots.restore(parent.state.pipeline):targetSet.create(b);
   if(cont&&b.targets&&!same){
     const old=pipeline,next=targetSet.create(b),prior=old.isTargetSet?old.pipelines:[old];
+    if(next.isPatternTargets)next.seed(prior);
+    if(next.isPatternTargets&&old.isPatternTargets)next.retiredObservedBytes=old.retiredObservedBytes;
     for(let i=0;i<next.rules.length;i++){
       const rule=next.rules[i],p=prior.find(p=>p.detector.p.host===rule.host&&p.detector.p.port===rule.port);
       if(!p)continue;
@@ -1993,7 +2064,8 @@ function start(o){
       diagnostics:diagnostics.fresh()};
     if(b.profile==='long-v1'||cont)Object.assign(fresh,{originMs:begin,sessionHistoryDropped:0,longEvidence:evidence.fresh()});
     if(cont)fresh.continuous=same?null:continuous.fresh(b,parent.state,begin);
-    if(cont&&b.targets)fresh.longEvidence.lastObservedBytes=pipeline.pipelines.reduce((n,p)=>n+p.detector.s.total,0);
+    if(cont&&b.targets)fresh.longEvidence.lastObservedBytes=(pipeline.retiredObservedBytes??0)+
+      pipeline.pipelines.reduce((n,p)=>n+p.detector.s.total,0);
     const s=same?copy(parent.state):fresh;
     if(!s.diagnostics)s.diagnostics=diagnostics.fresh();
     if(recovering)diagnostics.fault(s.diagnostics,'session_interrupted',s,begin,'interrupted_session',
@@ -2214,7 +2286,7 @@ function start(o){
       if(end>=sessionDeadline){yieldOrFinish();return;}
       if(!payload||!Array.isArray(payload.requests)){readFailure('invalid_requests_shape');return;}
       state.readFailures=0;
-      const relevant=payload.requests.filter(r=>{const dest=endpoint(r.URL);return dest&&rules.some(r=>dest.host===r.host&&dest.port===r.port)&&
+      const relevant=payload.requests.filter(r=>{const dest=endpoint(r.URL);return dest&&rules.some(r=>matchesTarget(r,dest.host,dest.port))&&
         r.local===true&&r.deviceName===b.deviceName&&r.completed===false&&r.failed===false;});
       if(relevant.some(r=>!['TCP','HTTPS'].includes(r.method)))throw Error('unexpected_target_transport');
       if(state.streamId===null&&relevant.length){const ids=new Set(relevant.map(r=>r.engineIdentifier));
@@ -2242,7 +2314,7 @@ function start(o){
       if(state.originMs===null&&f.point.reliable_read&&f.point.recently_productive){state.originMs=end;event('download_origin');}
       state.phase=phase(end);state.lastTargetCount=f.allTargetCount??f.targets.length;state.lastTrafficState=f.point.state;
       if(pipeline.isTargetSet)state.targetStatus=pipeline.frames.map((x,i)=>({id:x.targetId,
-        observedMs:x.received_ms,connections:x.targets.length,state:x.point.state,
+        host:pipeline.rules[i].host,configuredId:pipeline.isPatternTargets?pipeline.ruleFor(pipeline.rules[i].host,pipeline.rules[i].port).id:pipeline.rules[i].id,observedMs:x.received_ms,connections:x.targets.length,state:x.point.state,
         rateBps:x.point.phase_rate_Bps,slowBps:pipeline.rules[i].slowBps,observedBytes:pipeline.pipelines[i].detector.s.total}));
       record(f);
       const d=b.mode==='diagnostic'?diagnostic(f):pipeline.consider(f);
@@ -2296,19 +2368,42 @@ const canonical=x=>x===null||typeof x!=='object'?JSON.stringify(x):Array.isArray
 const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).sort().join()===keys.split(',').sort().join();
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const id=x=>typeof x==='string'&&/^[a-z0-9-]{16,64}$/.test(x);
+function validHost(host){return typeof host==='string'&&host.length<=253&&host.includes('.')&&
+  host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x));}
+function patternParts(pattern){
+  if(typeof pattern!=='string'||pattern.length>253||pattern.split('*').length!==2)return null;
+  const [prefix,suffix]=pattern.split('*');
+  if(!prefix||prefix.includes('.')||!suffix.includes('.')||!validHost(pattern.replace('*','x')))return null;
+  return [prefix,suffix];
+}
+function matchesTarget(rule,host,port){
+  if(port!==rule.port||!validHost(host))return false;
+  if(rule.host!==undefined)return host===rule.host;
+  const p=patternParts(rule.hostPattern);if(!p||!host.startsWith(p[0])||!host.endsWith(p[1]))return false;
+  const middle=host.slice(p[0].length,host.length-p[1].length);
+  return /^[a-z0-9-]+$/.test(middle);
+}
 function targetRules(b){
   const rules=b.targets??[{id:'primary',host:b.host,port:443,slowBps:2000000}];
   if(!Array.isArray(rules)||!rules.length||rules.length>4)throw Error('invalid_target_rules');
-  const ids=new Set(),hosts=new Set();
+  const ids=new Set();
   for(const r of rules){
-    if(!exact(r,'id,host,port,slowBps')||typeof r.id!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(r.id)||
-      typeof r.host!=='string'||r.host.length>253||!r.host.includes('.')||
-      !r.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
+    const pattern=r&&'hostPattern' in r;
+    if(!exact(r,'id,'+(pattern?'hostPattern':'host')+',port,slowBps')||typeof r.id!=='string'||!/^[a-z][a-z0-9-]{0,31}$/.test(r.id)||
+      (pattern?!patternParts(r.hostPattern):!validHost(r.host))||
       !integer(r.port)||r.port<1||r.port>65535||!integer(r.slowBps)||r.slowBps<=40960||r.slowBps>1e9||
-      ids.has(r.id)||hosts.has(r.host+':'+r.port))throw Error('invalid_target_rules');
-    ids.add(r.id);hosts.add(r.host+':'+r.port);
+      ids.has(r.id))throw Error('invalid_target_rules');
+    ids.add(r.id);
   }
   if(rules[0].host!==b.host||rules[0].port!==443)throw Error('primary_target_required');
+  for(let i=0;i<rules.length;i++)for(let j=0;j<i;j++){
+    const a=rules[i],b=rules[j];if(a.port!==b.port)continue;
+    let overlap=a.host?matchesTarget(b,a.host,a.port):b.host?matchesTarget(a,b.host,b.port):false;
+    if(!a.host&&!b.host){const x=patternParts(a.hostPattern),y=patternParts(b.hostPattern);
+      overlap=(x[0].startsWith(y[0])||y[0].startsWith(x[0]))&&
+        (x[1].endsWith(y[1])||y[1].endsWith(x[1]));}
+    if(overlap)throw Error('overlapping_target_rules');
+  }
   return rules.map(r=>({...r}));
 }
 function validateService(s){
@@ -2707,7 +2802,7 @@ function topup(s,o,g){
     state.grants={version:1,sequence:g.sequence,entries:[...entries,copy(g)]};return state;
   });return {status:'grant_received',received:true,duplicate:false,grant:copy(g),grants:next.grants};
 }
-module.exports={targetRules,topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control,checkEnvironment};
+module.exports={targetRules,matchesTarget,topup,PERIOD,canonical,validateService,validateTask,context,status,submit,cancel,admit,complete,control,checkEnvironment};
 
 };
 __factories["src/autonomous/job-probe"]=function(module,exports,require){
