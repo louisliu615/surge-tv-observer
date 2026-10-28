@@ -1,25 +1,22 @@
-# TEST VERSION: independent productive-download eligibility
+# TEST VERSION: continuous worker admission recovery
 
-Fixes an existing ordinary slow-download veto when a connection already present before a retry later becomes the main download. Independent test release after 443dcd23accbf00bc8903bbb508c228ea52445be. Stable main remains 62537e48c6f4b04c9f13bd221160bb765210fa53. Use the full fixed commit URL. Publication does not deploy or start a task.
+Independent repair candidate after d30b72e5. Use a fixed commit URL. Publication does not deploy or start a task; stable main is not updated.
 
-Build identity: 07286577a4f65d04778e634987b14c6f4e27d7bb81ea578fd16019cb13f7cb88. Offline verification: 515 checks, including 12 new regression cases, compiled package tests, native profile syntax, and 13,704 historical frames / 402 snapshot restores with exact old-profile parity. The historical traces lack this concurrent-peer case; the new regression explicitly reproduces the old veto and requires the fixed behavior. TV application and real playback effects of this release remain unverified.
+Build identity: 1e3c4bfd37490e75698507bb6f3e7a9e8a3b0c47000a75a74104bad0f6c877c3. Offline validation: 539 checks, including 12 admission failure/concurrency cases and 13,704 historical frames / 402 restores. Real TV application and long-running recovery remain to be verified.
 
-## Fix and preserved protections
+## Repair
 
-Ordinary productive slow downloads qualify using their own fresh evidence, without requiring attribution as a newly created successor of the previous action. Pre-existing same-endpoint peers can become eligible after the original protections expire. Successor attribution remains for outcome evidence; the narrowly bounded stalled-own-successor rescue keeps its existing independent lineage requirements and one-rescue limit. Evidence labels explicitly say replacement.requiredForProductiveDownload=false.
+Same-run continuous worker admissions use cron-aligned slots with fresh one-shot generations. Interrupted claims cannot permanently occupy all later slots. Every admission write checks its deadline, clock and parent HEAD. Same-slot contenders still use the existing splitter. Old doors are never reopened. The runtime records skipped admission slots and bounds generation cleanup to 64 per batch.
 
-Speed thresholds, real-growth and unique-main requirements, reliable-read limits, natural four-second startup, fixed five-second own-action protection, ordinary WAIT protection, recovery observations, final same-identity/new-growth revalidation, global spacing, rolling quota, charged reservations/cancellations and unknown-action fault locks remain. No quota reset, supplemental allowance, new speed-test downloads, host expansion or Apple segmented-playback policy is introduced.
+Closed nonterminal batches that do not hand off within the expected period and health allowance report handoff_stalled instead of indefinite normal waiting. This is queryable health, not push notification or external polling.
 
-The same veto is present in verified frozen pre-Apple versions a46ef915 and stable 62537e48, as well as 0c96849a and the earlier read-only f111e3bd. This fixes a pre-existing pipeline defect; it was not introduced by bounded Apple host globs.
+## Unchanged behavior
 
-## Changes
+Target policies, independent productive-download eligibility, polling rates, thresholds, natural startup and own-action protection, rolling budgets, supplemental allowances, action records and unknown-action fault locks are unchanged. No target names, installed bindings or credentials are included. Existing consumption and action clocks must be preserved on upgrade.
 
-- One configured worker and one active-connection API read per polling cycle. Each actual matched endpoint has its own detector, speed threshold, startup/wait state, revalidation and successor evidence. Speeds and recovery lineage are never merged across endpoints.
-- Optional service.targets contains up to four non-overlapping id/host-or-hostPattern/port/slowBps rules. A bounded glob permits one star inside the first DNS label, with a literal prefix and fixed domain suffix; it cannot span dots. Runtime policies remain exact per actual host:port, with at most four retained instances. Only absent instances other than the most recent action target can be retired; cumulative traffic remains recorded. The first rule preserves the original installation host on port 443. Tasks cannot override targets. Without targets, the old single-target path remains available.
-- The shared rolling allowance, unknown-action fault lock and global minimum five-second action spacing remain. Adding targets never refills allowance or doubles it. Natural four-second startup, fixed five-second own-action protection and ordinary near-zero waiting protection remain.
-- Polling adopts the fastest requirement among endpoints: 100 ms for download/recovery/uncertainty, 250 ms only for strict stable waits, 1000 ms when all targets are absent. Two active endpoints share one approximately 10 Hz loop, rather than independent loops. A newly monitored endpoint can increase time spent in fast polling.
-- Explicit scopes replace build-time source-string substitutions. Public JavaScript contains no installed target names, device names or credentials. Each action records targetId; excerpts stay scoped to their target. Aggregate bytes and selected-target rates are labeled separately.
-- Snapshots persist all target policies and the last action state. Closed-installation upgrades preserve the budget scope, existing consumption and action clocks. Threshold changes rebuild measurement evidence. Removing the most recently acted-on endpoint currently requires explicit protection-state migration and is refused automatically.
+## Qualification limits
+
+Slot recovery applies only to same-run continuous runtime admissions. First initialization, finite tasks and control transactions retain the existing admission behavior. Write checks are not storage compare-and-swap; concurrency depends on the documented coherent atomic individual reads/writes and actual runtime scheduling. Offline interleaving tests do not prove all cross-JSC suspension behavior. The original interruption trigger remains unknown.
 
 ## Upgrade boundaries
 

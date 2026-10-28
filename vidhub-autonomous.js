@@ -1,4 +1,4 @@
-// Version 07286577a4f65d04778e634987b14c6f4e27d7bb81ea578fd16019cb13f7cb88; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
+// Version 1e3c4bfd37490e75698507bb6f3e7a9e8a3b0c47000a75a74104bad0f6c877c3; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="07286577a4f65d04778e634987b14c6f4e27d7bb81ea578fd16019cb13f7cb88";
+const __codeId="1e3c4bfd37490e75698507bb6f3e7a9e8a3b0c47000a75a74104bad0f6c877c3";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/target-scope"]=function(module,exports,require){
 'use strict';
@@ -1138,6 +1138,8 @@ function writer(store){
 function health(s,t){
   if(!s)return null;
   let state=s.closed?(s.terminal?'ended':'waiting_next_batch'):'running';
+  if(s.closed&&!s.terminal&&Number.isSafeInteger(s.sessionDeadlineMs)&&
+    t>Math.max(s.sessionDeadlineMs,s.updatedMs)+schedule.periodMs+schedule.healthStaleMs)state='handoff_stalled';
   if(!s.closed&&Number.isSafeInteger(s.sessionDeadlineMs)&&t>=s.sessionDeadlineMs)state='interrupted';
   else if(!s.closed&&t-s.updatedMs>schedule.healthStaleMs)state='unresponsive';
   else if(!s.closed&&s.readFailures>0)state='retrying_read';
@@ -1152,7 +1154,7 @@ function health(s,t){
     readErrors:s.readErrors??0,recoveries:s.recoveries??0,lastFault:s.lastFault??null,
     diagnostics:s.diagnostics?{faultCounts:s.diagnostics.faultCounts,faultsDropped:s.diagnostics.faultsDropped,
       lastFault:s.diagnostics.faults.at(-1)??null,maxSavedGap:s.diagnostics.maxSavedGap}:null,
-    actionsBlocked:s.terminal||s.continuous?.faultLocked===true||state==='interrupted'||state==='unresponsive'||state==='retrying_read'||afterDeadline,
+    actionsBlocked:s.terminal||s.continuous?.faultLocked===true||state==='handoff_stalled'||state==='interrupted'||state==='unresponsive'||state==='retrying_read'||afterDeadline,
     afterDeadline};
 }
 function head(store,details=true){
@@ -1166,23 +1168,37 @@ function head(store,details=true){
     typeof s.closed!=='boolean'||typeof s.terminal!=='boolean')throw Error('head_state_mismatch');
   return {raw,value:h,state:details?hydrate(store,s):s};
 }
-function begin(store,parent,runId,sessionId,codeId,makeState,recoveryAt=null){
-  const generation=parent.value?parent.value.generation+1:0;
+// Continuous runtime admissions use non-overlapping cron slots. A slot's door
+// is never reopened: after its commit deadline, every writer from that slot is
+// fenced out and a later slot uses a fresh generation. No wall-clock lease is
+// inferred for legacy/control callers that do not pass this option.
+function begin(store,parent,runId,sessionId,codeId,makeState,recoveryAt=null,admission=null){
+  let generation=parent.value?parent.value.generation+1:0,deadline=null,slotStart=null;
+  if(admission!==null){
+    const t=admission.now(),anchor=parent.state?.sessionStartedMs;
+    if(!integer(t)||!integer(anchor)||t<parent.state.updatedMs)throw Error('invalid_admission_clock');
+    const base=Math.floor(anchor/schedule.periodMs)*schedule.periodMs+schedule.periodMs;
+    const slot=Math.max(0,Math.floor((t-base)/schedule.periodMs));
+    generation+=slot;slotStart=t;deadline=base+(slot+1)*schedule.periodMs;
+    if(!integer(generation)||!integer(deadline))throw Error('invalid_admission_slot');
+  }
   const fenced=recoveryAt!==null&&integer(recoveryAt)&&parent.state?.runId===runId&&
     parent.state.codeId===codeId&&integer(parent.state.sessionDeadlineMs)&&recoveryAt>=parent.state.sessionDeadlineMs+schedule.takeoverGraceMs;
   if(parent.state&&((!parent.state.closed&&!fenced)||(!parent.state.terminal&&parent.state.runId!==runId)))
     return {accepted:false,reason:'previous_worker_not_closed'};
   const fencedStore={read:store.read,write:(k,v)=>{
+    if(admission!==null){const t=admission.now();
+      if(!integer(t)||t<slotStart||t>=deadline)throw Error('admission_slot_expired');}
     if(store.read(HEAD)!==parent.raw)throw Error('parent_changed_during_claim');
     return store.write(k,v);
   }};
   if(!claim(fencedStore,generation,sessionId))return {accepted:false,reason:'splitter_not_won'};
   if(store.read(HEAD)!==parent.raw)throw Error('parent_changed_during_claim');
   const h={version:1,generation,runId,sessionId,codeId};
-  const s=makeState(h);const raw=writer(store)(s),header=JSON.stringify(h);
-  if(raw.length>524288||store.write(key(generation,'state'),raw)!==true||
+  const s=makeState(h);const raw=writer(fencedStore)(s),header=JSON.stringify(h);
+  if(raw.length>524288||fencedStore.write(key(generation,'state'),raw)!==true||
     store.read(key(generation,'state'))!==raw)throw Error('initial_state_write_failed');
-  if(store.write(HEAD,header)!==true||store.read(HEAD)!==header)throw Error('head_write_failed');
+  if(fencedStore.write(HEAD,header)!==true||store.read(HEAD)!==header)throw Error('head_write_failed');
   return {accepted:true,header,state:s};
 }
 module.exports={PREFIX,HEAD,key,splitter,claim,parse,head,begin,hydrate,writer,health,pageKey};
@@ -1672,7 +1688,10 @@ function gc(s,store,owned){
     if(store.read(k)!==null&&(store.write(k,null)!==true||store.read(k)!==null))throw Error('retention_delete_failed');};
   // The already-committed index no longer references these pages.
   while(c.actionGcThrough<c.actionsDropped){del(owner.pageKey(s.runId,c.actionGcThrough+1));c.actionGcThrough++;}
-  while(c.ownerGcThrough<s.generation-2){
+  // A long offline interval can skip many admission slots. Bound cleanup work
+  // per batch; retain the cursor so a later batch continues without a stall.
+  let retired=0;
+  while(c.ownerGcThrough<s.generation-2&&retired++<64){
     const g=c.ownerGcThrough+1,raw=store.read(owner.key(g,'state'));
     // Retain earlier completed runs for the control-plane export retention.
     if(raw!==null){const old=owner.parse(raw);
@@ -2076,9 +2095,12 @@ function start(o){
     return {...s,...h,closed:false,terminal:false,reason:null,updatedMs:begin,sessionStartedMs:begin,
       sessionDeadlineMs:sessionDeadline,recoveries:(s.recoveries||0)+(recovering?1:0),
       lastFault:recovering?'interrupted_session':s.lastFault,sessions:s.sessions+1,phase:'starting',pipeline:snapshots.capture(pipeline)};
-  },recovering?begin:null);
+  },recovering?begin:null,cont&&same?{now}:null);
   if(!claim.accepted){done(claim.reason);return;}
   owned=claim.header;state=claim.state;
+  if(cont&&parent.value&&state.generation>parent.value.generation+1)
+    event('admission_slots_skipped',{fromGeneration:parent.value.generation,
+      toGeneration:state.generation,skipped:state.generation-parent.value.generation-1});
   if(cont&&!state.samplingCounts){state.samplingCounts={baselineSamples:state.samples,fast:0,waiting:0,absent:0};
     state.samplingWaitPeriodMs=WAIT;}
   const samplingLog=cont?new samplingEvidence.SamplingEvidence(state):null;
