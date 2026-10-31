@@ -1,4 +1,4 @@
-// Version 1e3c4bfd37490e75698507bb6f3e7a9e8a3b0c47000a75a74104bad0f6c877c3; phase: isolated configurable target policies; fresh dispatch revalidation; shared rolling quota; action-trial build; runtime acceptance pending.
+// Version c2beafac7f9d929aadb7ff08265bdab564722052cd42ada6430c6a6215948ee6; phase: isolated configurable target policies; fresh dispatch revalidation; configurable quota with explicit unlimited continuous mode; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="1e3c4bfd37490e75698507bb6f3e7a9e8a3b0c47000a75a74104bad0f6c877c3";
+const __codeId="c2beafac7f9d929aadb7ff08265bdab564722052cd42ada6430c6a6215948ee6";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/target-scope"]=function(module,exports,require){
 'use strict';
@@ -1528,9 +1528,9 @@ const exact=(x,keys)=>x&&typeof x==='object'&&!Array.isArray(x)&&
   Object.keys(x).sort().join()===keys.slice().sort().join();
 function validate(s){
   if(!exact(s,['version','scope','limit','windowMs','observedMs','totalReserved','entries'])||s.version!==1||
-    typeof s.scope!=='string'||!/^[a-z0-9-]{8,80}$/.test(s.scope)||!integer(s.limit)||s.limit<1||s.limit>MAX_LIMIT||
+    typeof s.scope!=='string'||!/^[a-z0-9-]{8,80}$/.test(s.scope)||(s.limit!==null&&(!integer(s.limit)||s.limit<1||s.limit>MAX_LIMIT))||
     s.windowMs!==WINDOW_MS||!integer(s.observedMs)||!integer(s.totalReserved)||
-    !Array.isArray(s.entries)||s.entries.length>s.limit||s.entries.length>s.totalReserved)
+    !Array.isArray(s.entries)||s.entries.length>(s.limit===null?MAX_LIMIT:s.limit)||s.entries.length>s.totalReserved)
     throw Error('invalid_rolling_budget');
   let lastTime=null;
   for(let i=0;i<s.entries.length;i++){
@@ -1555,6 +1555,8 @@ function advance(s,now){
 }
 function view(s,now){
   const n=advance(s,now);
+  if(n.limit===null)return {scope:n.scope,limit:null,windowMs:n.windowMs,unlimited:true,used:null,remaining:null,
+    retainedReservations:n.entries.length,totalReserved:n.totalReserved,nextReleaseMs:null};
   return {scope:n.scope,limit:n.limit,windowMs:n.windowMs,used:n.entries.length,remaining:n.limit-n.entries.length,
     totalReserved:n.totalReserved,nextReleaseMs:n.entries.length?n.entries[0].reservedMs+n.windowMs:null};
 }
@@ -1563,9 +1565,11 @@ function prepareReservation(s,now,expectedSequence){
   // A lost acknowledgement cannot turn a retried reservation into another slot.
   if(!integer(expectedSequence)||expectedSequence!==next.totalReserved+1)
     throw Error('rolling_budget_sequence_mismatch');
-  if(next.entries.length>=next.limit)return {allowed:false,next,reason:'rolling_budget_exhausted'};
+  if(next.limit!==null&&next.entries.length>=next.limit)return {allowed:false,next,reason:'rolling_budget_exhausted'};
   next.totalReserved=expectedSequence;
   const reservation={sequence:expectedSequence,reservedMs:now};next.entries.push(reservation);
+  // Unlimited admission still has durable sequence accounting and bounded storage.
+  if(next.limit===null&&next.entries.length>MAX_LIMIT)next.entries.shift();
   validate(next);return {allowed:true,next,reservation,reason:'reserved_requires_durable_commit'};
 }
 module.exports={WINDOW_MS,MAX_LIMIT,fresh,validate,advance,view,prepareReservation};
@@ -1618,20 +1622,23 @@ function sync(s,g,t){
 function view(s,t){
   validate(s);const base=rolling.view(s.base,t),extra=s.uses.filter(u=>t<u.expiresMs);
   return {base,extra:extra.map(u=>({...u,remaining:u.count-u.used})),
-    remaining:base.remaining+extra.reduce((n,u)=>n+u.count-u.used,0),totalReserved:s.totalReserved,
+    ...(base.unlimited?{unlimited:true}:{}),
+    remaining:base.unlimited?null:base.remaining+extra.reduce((n,u)=>n+u.count-u.used,0),totalReserved:s.totalReserved,
     grantSequence:s.grantSequence};
 }
 function reserve(s,t){
   const next=copy(validate(s));next.base=rolling.advance(s.base,t);const v=view(next,t);
-  if(!v.remaining)return {allowed:false,next};
+  if(!v.unlimited&&!v.remaining)return {allowed:false,next};
   let source;
-  if(v.base.remaining){const r=rolling.prepareReservation(next.base,t,next.base.totalReserved+1);next.base=r.next;source={kind:'base',sequence:r.reservation.sequence};}
+  if(v.base.unlimited||v.base.remaining){const r=rolling.prepareReservation(next.base,t,next.base.totalReserved+1);next.base=r.next;source={kind:'base',sequence:r.reservation.sequence};}
   else {const u=next.uses.filter(u=>t<u.expiresMs&&u.used<u.count).sort((a,b)=>a.expiresMs-b.expiresMs||a.sequence-b.sequence)[0];
     u.used++;source={kind:'grant',id:u.id,sequence:u.sequence,used:u.used,expiresMs:u.expiresMs};}
   next.totalReserved++;if(!integer(next.totalReserved))throw Error('allowance_counter_capacity');
   return {allowed:true,next,source};
 }
-module.exports={fresh,validate,grants,sync,view,reserve};
+const limitRank=limit=>limit===null?Infinity:(limit===undefined?100:limit);
+function available(s,t){const v=view(s,t);return v.unlimited===true||v.remaining>0;}
+module.exports={fresh,validate,grants,sync,view,reserve,limitRank,available};
 
 };
 __factories["src/autonomous/continuous"]=function(module,exports,require){
@@ -1647,7 +1654,7 @@ function validateBinding(b,validate){
     expiresMs:b.expiresMs??b.notBeforeMs+86400000,maxAttempts:b.maxAttempts??(b.mode==='observe'?0:100)};
   delete normalized.budgetScope;delete normalized.engineRecovery;delete normalized.baseLimit;
   if('targets' in b){require('./jobs').targetRules(b);delete normalized.targets;}
-  if('baseLimit' in b&&![100,200].includes(b.baseLimit))throw Error('invalid_base_limit');
+  if('baseLimit' in b&&![100,200,null].includes(b.baseLimit))throw Error('invalid_base_limit');
   if('engineRecovery' in b&&!['auto','pause'].includes(b.engineRecovery))throw Error('invalid_engine_recovery');
   validate(normalized);return b;
 }
@@ -1659,13 +1666,13 @@ function fresh(b,parent,t){
     allowance.validate(c.allowance);
     const next=JSON.parse(JSON.stringify(c));
     if(b.baseLimit!==undefined){
-      if(b.baseLimit<c.allowance.base.limit)throw Error('base_limit_decrease_requires_review');
+      if(allowance.limitRank(b.baseLimit)<allowance.limitRank(c.allowance.base.limit))throw Error('base_limit_decrease_requires_review');
       next.allowance.base.limit=b.baseLimit;allowance.validate(next.allowance);
     }
     return {...next,actionsDropped:0,actionGcThrough:0,inheritedActionAt:parent.pipeline.own.actionAt,runBaseTotal:c.allowance.totalReserved};
   }
   return {version:1,scope:b.budgetScope,target:b.host,device:b.deviceName,
-    allowance:allowance.fresh(b.budgetScope,t,b.baseLimit??100),runBaseTotal:0,actionsDropped:0,
+    allowance:allowance.fresh(b.budgetScope,t,b.baseLimit===undefined?100:b.baseLimit),runBaseTotal:0,actionsDropped:0,
     actionGcThrough:0,inheritedActionAt:null,ownerGcThrough:parent?.generation??-1,faultLocked:false};
 }
 function validateState(c,b){
@@ -2181,7 +2188,7 @@ function start(o){
     // read after that refresh, never the earlier measurement timestamp.
     const stopped=signals(true),t=now();return !stopped&&!ended&&o.capabilities?.actionsQualified===true&&b.mode!=='observe'&&
     !state.actionsDisabled&&(reserved?state.attemptsReserved<=cap:state.attemptsReserved<cap)&&
-    (!cont||(!state.continuous.faultLocked&&(reserved||allowance.view(state.continuous.allowance,t).remaining>0)))&&phase(t)==='actions'&&
+    (!cont||(!state.continuous.faultLocked&&(reserved||allowance.available(state.continuous.allowance,t))))&&phase(t)==='actions'&&
     t<expiry&&t<sessionDeadline&&store.read(ownership.HEAD)===owned;}
   function record(f){
     if(pipeline.isTargetSet){
@@ -2435,7 +2442,7 @@ function validateService(s){
   if(!exact(s,'protocol,installationId,host,deviceName,expectedBuild,expectedModel'+(s&&'layout' in s?',layout':'')+(s&&'budgetScope' in s?',budgetScope':'')+(s&&'engineRecovery' in s?',engineRecovery':'')+(s&&'baseLimit' in s?',baseLimit':'')+(s&&'targets' in s?',targets':''))||
     ('layout' in s&&!['single-worker-v1','diagnostic-pair-v1'].includes(s.layout))||
     ('budgetScope' in s&&(!id(s.budgetScope)||s.layout!=='single-worker-v1'))||
-    ('baseLimit' in s&&(!s.budgetScope||![100,200].includes(s.baseLimit)))||
+    ('baseLimit' in s&&(!s.budgetScope||![100,200,null].includes(s.baseLimit)))||
     ('engineRecovery' in s&&(!s.budgetScope||!['auto','pause'].includes(s.engineRecovery)))||s.protocol!==2||!id(s.installationId)||
     typeof s.host!=='string'||s.host.length>253||!s.host.includes('.')||
     !s.host.split('.').every(x=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(x))||
@@ -2484,7 +2491,7 @@ function ledgerService(s,j){
   // Closed historical jobs retain their original authorized base limit.
   if(j.phase!=='finished'||j.task.profile!=='continuous-v1')return s;
   const old=j.binding?.baseLimit;
-  if((old??100)>(s.baseLimit??100))throw Error('historical_base_limit_exceeds_service');
+  if(allowance.limitRank(old)>allowance.limitRank(s.baseLimit))throw Error('historical_base_limit_exceeds_service');
   const prior={...s};delete prior.baseLimit;if(old!==undefined)prior.baseLimit=old;
   delete prior.targets;if(j.binding?.targets)prior.targets=copy(j.binding.targets);return prior;
 }
@@ -2531,7 +2538,7 @@ function context(s,o){
       delete priorService.targets;if(s.targets)priorService.targets=copy(s.targets);
     }
     const upgrade=!!(s.budgetScope&&previous?.budgetScope===s.budgetScope&&
-      (s.baseLimit??100)>=(previous.baseLimit??100)&&
+      allowance.limitRank(s.baseLimit)>=allowance.limitRank(previous.baseLimit)&&
       canonical({...priorService,installationId:s.installationId,...('baseLimit' in s?{baseLimit:s.baseLimit}:{})})===canonical(s)&&
       (!h.state.current||['finished','cancelled','expired'].includes(h.state.current.phase)));
     if(h.state&&((!upgrade&&(h.state.codeId!==o.codeId||h.state.service!==canonical(s)))||!integer(h.state.clockMs)||

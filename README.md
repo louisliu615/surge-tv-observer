@@ -1,25 +1,22 @@
-# TEST VERSION: continuous worker admission recovery
+# Continuous mode without a daily action quota
 
-Independent repair candidate after d30b72e5. Use a fixed commit URL. Publication does not deploy or start a task; stable main is not updated.
+Independent fixed-version update after 45f94019. Stable main and earlier fixed releases are unchanged. Publication alone neither deploys nor starts a task.
 
-Build identity: 1e3c4bfd37490e75698507bb6f3e7a9e8a3b0c47000a75a74104bad0f6c877c3. Offline validation: 539 checks, including 12 admission failure/concurrency cases and 13,704 historical frames / 402 restores. Real TV application and long-running recovery remain to be verified.
+An explicit service `baseLimit: null` removes the rolling 24-hour admission quota for continuous tasks. Missing configuration keeps the previous default, and explicit 100/200 limits remain supported. Unlimited status reports `unlimited: true` and `remaining: null`; this is not zero or an invented balance. Finite task attempt limits remain enforced.
 
-## Repair
+## Preserved behavior
 
-Same-run continuous worker admissions use cron-aligned slots with fresh one-shot generations. Interrupted claims cannot permanently occupy all later slots. Every admission write checks its deadline, clock and parent HEAD. Same-slot contenders still use the existing splitter. Old doors are never reopened. The runtime records skipped admission slots and bounds generation cleanup to 64 per batch.
+The fixed five-second post-action protection, natural startup protection, target matching, speed thresholds, productive main-connection requirements, wait handling, bounded own-successor rescue, recovery confirmation, fresh revalidation and unknown-action fault locks are unchanged. There is no new burst limiter, cooldown or backoff. Runtime admission still durably records each reservation before a single-connection action.
 
-Closed nonterminal batches that do not hand off within the expected period and health allowance report handoff_stalled instead of indefinite normal waiting. This is queryable health, not push notification or external polling.
+Unlimited mode retains lifetime counters and at most 200 recent reservation entries, with entries older than 24 hours removed. These retained entries are not a complete rolling daily count. Action evidence remains bounded to the existing most recent 100 actions. Other retention and scheduling limits are unchanged.
 
-## Unchanged behavior
+## Upgrade and rollback
 
-Target policies, independent productive-download eligibility, polling rates, thresholds, natural startup and own-action protection, rolling budgets, supplemental allowances, action records and unknown-action fault locks are unchanged. No target names, installed bindings or credentials are included. Existing consumption and action clocks must be preserved on upgrade.
+Close and independently verify the prior task before moving to a new installation and task. Preserve the ledger scope, lifetime sequence, existing records, fault state and previous action time. A locked unknown action cannot be unlocked by this change. Direct downgrade from unlimited to a capped or old-code installation is refused; the bounded retained history cannot reconstruct a complete daily allowance. Such rollback requires a separate conservative migration.
 
-## Qualification limits
+Use authoritative source files for deployment, not redacted runtime exports. The public bundle contains no installed target names, device bindings, private proxy configuration or credentials.
 
-Slot recovery applies only to same-run continuous runtime admissions. First initialization, finite tasks and control transactions retain the existing admission behavior. Write checks are not storage compare-and-swap; concurrency depends on the documented coherent atomic individual reads/writes and actual runtime scheduling. Offline interleaving tests do not prove all cross-JSC suspension behavior. The original interruption trigger remains unknown.
+## Validation
 
-## Upgrade boundaries
-
-Use a new fixed installation after the old task is independently confirmed closed and terminal. Preserve the stable budget scope, base limit, consumption, grants and action clocks. Snapshots and quota formats remain compatible; original released bundles are immutable. Accept source staging, TV declarations, resource readiness, task admission, autonomous runtime, actual interruption and playback benefit as separate evidence.
-
-One worker still reads existing connection byte counters once per cycle. There is no separate speed-test script or test-file traffic. No proxy/route changes, engine restart or blanket connection kill is part of this release. This eligibility correction may allow ordinary slow connections that the old defect skipped; the original action interval and quota still limit retries. CPU, power and causal throughput benefits require real-device evidence.
+Build identity: c2beafac7f9d929aadb7ff08265bdab564722052cd42ada6430c6a6215948ee6.
+551 offline checks passed, including 13,704 historical frames and 402 restores. Checks cover actions beyond 200, five-second spacing, cross-batch continuation, engine recovery, unknown-action lock, stop, finite/observe modes, bounded storage and migration from an exhausted ledger. The real exported old ledger was replayed locally with 1,000 additional simulated reservations; history and action time were retained. Eleven detector/policy/pipeline files match the previous fixed release byte for byte. Real TV activation and playback effects remain to be verified.
