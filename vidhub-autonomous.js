@@ -1,4 +1,4 @@
-// Version c2beafac7f9d929aadb7ff08265bdab564722052cd42ada6430c6a6215948ee6; phase: isolated configurable target policies; fresh dispatch revalidation; configurable quota with explicit unlimited continuous mode; action-trial build; runtime acceptance pending.
+// Version ad8472762a90de9773435b84b5390ea1e2857f460a9b60a85358e395b1967681; phase: isolated configurable target policies; per-target identity rebaseline; fresh dispatch revalidation; configurable quota with explicit unlimited continuous mode; action-trial build; runtime acceptance pending.
 (function(){'use strict';
 let __binding;
 const __factories=Object.create(null),__cache=Object.create(null);
@@ -10,7 +10,7 @@ function __require(id){
   if(s==='..')p.pop();else if(s!=='.')p.push(s);}return __require(p.join('/'));};
  __factories[id](m,m.exports,require);return m.exports;
 }
-const __codeId="c2beafac7f9d929aadb7ff08265bdab564722052cd42ada6430c6a6215948ee6";
+const __codeId="ad8472762a90de9773435b84b5390ea1e2857f460a9b60a85358e395b1967681";
 const __capabilities=Object.freeze({"actionsQualified": true});
 __factories["src/core/target-scope"]=function(module,exports,require){
 'use strict';
@@ -963,25 +963,33 @@ class Pipeline{
   }
   ingest(payload,beginMs,endMs,expectedEngine){
     if(!finite(beginMs)||!finite(endMs)||endMs<beginMs)throw Error('invalid_read_clock');
+    const time_s=(beginMs+endMs)/2000,read_ms=endMs-beginMs;
+    if(this.lastTime!==null&&time_s<=this.lastTime)throw Error('non_increasing_clock');
     const mapped=this.adapt(payload),targets=mapped.map(r=>{
       const matches=payload.requests.filter(x=>x.id===r.id);
       if(matches.length!==1)throw Error('ambiguous_identity');
       const raw=matches[0],row={id:r.id,inBytes:r.inBytes,started:raw.startDate,engine:raw.engineIdentifier};
-      const fp=fingerprint(row);
+      fingerprint(row);
       if(expectedEngine!==undefined&&row.engine!==expectedEngine)throw Error('engine_changed');
-      if(this.seen.has(row.id)&&this.seen.get(row.id)!==fp)throw Error('reused_connection_identity');
-      this.seen.set(row.id,fp);
+      return row;
+    });
+    const changes=targets.filter(r=>this.seen.has(r.id)&&this.seen.get(r.id)!==fingerprint(r))
+      .map(r=>({id:r.id,previous:this.seen.get(r.id),current:fingerprint(r)}));
+    if(changes.length){
+      if(!this.continuous)throw Error('reused_connection_identity');
+      this.rebaselineIdentity(endMs);
+    }
+    for(const row of targets){
+      this.seen.set(row.id,fingerprint(row));
       if(this.continuous&&this.seen.size>1024){const present=new Set(mapped.map(r=>r.id));
         for(const id of this.seen.keys())if(!present.has(id)){this.seen.delete(id);break;}}
       if(this.seen.size>(this.review?1024:256))throw Error('identity_history_capacity');
-      return row;
-    });
-    const time_s=(beginMs+endMs)/2000,read_ms=endMs-beginMs;
-    if(this.lastTime!==null&&time_s<=this.lastTime)throw Error('non_increasing_clock');
+    }
     this.lastTime=time_s;
     const point=this.detector.ingest({time_s,read_ms,targets:mapped});
     if(point.needs_baseline)throw Error('invalid_core_sample');
-    const frame={time_s,read_ms,received_ms:endMs,point,targets,unique_main:uniqueMain(this.detector,point)};
+    const frame={time_s,read_ms,received_ms:endMs,point,targets,unique_main:uniqueMain(this.detector,point),
+      ...(changes.length?{identityRebaseline:{changes}}:{})};
     frame.rearm=this.own.ingest(frame);frame.startup=this.startup.ingest(frame);
     if(this.replacement){
       this.replacement.observe(frame);
@@ -991,6 +999,24 @@ class Pipeline{
     if(this.review)this.review.ingest(frame);
     if(this.sampling)frame.sampling=this.sampling.ingest(frame);
     return frame;
+  }
+  rebaselineIdentity(nowMs){
+    // No old rate/startup/replacement evidence may cross a changed identity.
+    // Preserve cumulative bytes and own-action clocks, including the 5 s gate.
+    const p=new Pipeline('continuous-v1',this.scope,this.slowBps);
+    p.explicitScope=this.explicitScope;p.detector.s.total=this.detector.s.total;
+    Object.assign(p.own,this.own);
+    if(this.sampling)p.enableWaitSampling();
+    const pending=this.own.actionAt!==null&&nowMs/1000-this.own.actionAt<5;
+    p.review.s={...this.review.s,disarmed:'successor_lost_or_ambiguous',successor:null,previous:null,
+      quietAt:null,fast:null,hadTarget:pending,emptyAt:null,emptyLast:null,entryAt:null};
+    // Baseline replacement may happen in active download, without a preceding
+    // WAIT episode. Explicitly arm the natural window from this observation;
+    // the ordinary wait-resume policy alone cannot cover that case.
+    p.startup.start=nowMs/1000;p.startup.end=p.startup.start+POLICY.startup_s;
+    p.startup.source='new_connection_first_seen';p.startup.episode=1;
+    // The own-action gate remains independent and retains its original time.
+    Object.assign(this,p);
   }
   consider(frame){
     const d=this.considerMeasurement(frame);
@@ -1392,7 +1418,7 @@ __factories["src/autonomous/diagnostics"]=function(module,exports,require){
 const LIMIT=32;
 const integer=x=>Number.isSafeInteger(x)&&x>=0;
 const fresh=()=>({version:1,faults:[],faultsDropped:0,faultCounts:{},maxSavedGap:null});
-const TYPES=['session_interrupted','read_failure','terminal_fault','engine_rebaseline'];
+const TYPES=['session_interrupted','read_failure','terminal_fault','engine_rebaseline','identity_rebaseline'];
 function validate(d){
   if(!d||d.version!==1||!Array.isArray(d.faults)||d.faults.length>LIMIT||!integer(d.faultsDropped)||
     !d.faultCounts||Object.keys(d.faultCounts).some(k=>!TYPES.includes(k)||!integer(d.faultCounts[k]))||
@@ -1404,6 +1430,13 @@ function validate(d){
       typeof f.reason!=='string'||!/^[a-z_]{1,80}$/.test(f.reason)||
       !['lastCheckpointMs','lastSuccessfulReadMs','previousDeadlineMs','expectedEngine','observedEngine']
         .every(k=>f[k]===null||integer(f[k])))throw Error('invalid_diagnostic_fault');
+    if(f.type==='identity_rebaseline'){
+      const x=f.identity,fp=v=>typeof v==='string'&&/^[0-9]+\/[0-9]+(?:\.[0-9]+)?\/[0-9]+$/.test(v)&&v.length<=100;
+      if(!x||!(x.targetId===null||typeof x.targetId==='string'&&x.targetId.length<=64)||
+        !Array.isArray(x.changes)||x.changes.length<1||x.changes.length>8||
+        x.changes.some(c=>!integer(c.id)||!fp(c.previous)||!fp(c.current)||c.previous===c.current||
+          !c.previous.startsWith(c.id+'/')||!c.current.startsWith(c.id+'/')))throw Error('invalid_identity_diagnostic');
+    }
   }
   const g=d.maxSavedGap;
   if(g!==null&&(!integer(g.fromMs)||!integer(g.toMs)||g.toMs<=g.fromMs||g.gapMs!==g.toMs-g.fromMs||
@@ -1420,7 +1453,8 @@ function fault(d,type,s,t,reason,extra={}){
     lastCheckpointMs:extra.lastCheckpointMs??s.updatedMs??null,
     lastSuccessfulReadMs:s.lastSuccessfulReadMs??null,
     previousDeadlineMs:extra.previousDeadlineMs??null,
-    expectedEngine:s.streamId??null,observedEngine:extra.observedEngine??null});
+    expectedEngine:s.streamId??null,observedEngine:extra.observedEngine??null,
+    ...(type==='identity_rebaseline'?{identity:extra.identity}:{})});
   if(d.faults.length>LIMIT){d.faults.shift();d.faultsDropped++;}
   validate(d);
 }
@@ -2332,6 +2366,22 @@ function start(o){
         state.streamId=observedEngine;pending=null;
       }
       const f=pipeline.ingest(payload,t,end,state.streamId===null?undefined:state.streamId);lastFrame=f;
+      const identityFrames=(pipeline.isTargetSet?pipeline.frames:[f]).filter(x=>x.identityRebaseline);
+      if(identityFrames.length){
+        pending=null;
+        for(const x of identityFrames){
+          diagnostics.fault(state.diagnostics,'identity_rebaseline',state,end,'connection_identity_rebaselined',
+            {observedEngine,lastCheckpointMs:lastPersistedMs,identity:{targetId:x.targetId??null,...x.identityRebaseline}});
+          const a=state.actions.at(-1);
+          if(a&&(!x.targetId||a.targetId===x.targetId)&&a.startedMs!==null&&a.followupEndMs===null)a.followupEndMs=end;
+        }
+        state.recent=[];samplingLog?.close('identity_changed',end);
+        // A reservation may be waiting on its final freshness read. We know
+        // this owner has not dispatched it; cancel without refund or replay.
+        if(reservedPending){cancelReservation('identity_changed_before_dispatch',false);persist();}
+        // Ordinary identity churn uses the existing checkpoint cadence, not
+        // an extra storage transaction on every sample.
+      }
       diagnostics.gap(state.diagnostics,state,state.lastSuccessfulReadMs??null,end,
         state.samples===(same?parent.state.samples:0)?(recovering?'interrupted_handoff':same?'normal_handoff':'same_session'):'same_session',
         state.samples===(same?parent.state.samples:0)&&same?parent.state.updatedMs:lastPersistedMs);
